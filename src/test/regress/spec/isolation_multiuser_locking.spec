@@ -1,8 +1,5 @@
 setup
 {
-	SELECT citus_internal.replace_isolation_tester_func();
-	SELECT citus_internal.refresh_isolation_tester_prepared_statement();
-
 	SET citus.shard_replication_factor TO 1;
 
 	CREATE USER test_user_1;
@@ -19,8 +16,6 @@ setup
 
 teardown
 {
-	SELECT citus_internal.restore_isolation_tester_func();
-
 	BEGIN;
 	DROP TABLE IF EXISTS test_table;
 	DROP USER test_user_1, test_user_2;
