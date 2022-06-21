@@ -920,14 +920,20 @@ if (!$conninfo)
         system(catfile($bindir, "psql"),
             ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "postgres",
                 '-c', "CREATE DATABASE regression;")) == 0
-            or die "Could not create regression database on worker";
+            or die "Could not create regression database on worker port $port.";
+        print "Created database regression on worker port $port. \n";
+        system(catfile($bindir, "psql"),
+                ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
+                    '-c', "SHOW shared_preload_libraries;")) == 0
+                or die "Could not show shared_preload_libraries on worker $port.";
 
         for my $extension (@extensions)
         {
             system(catfile($bindir, "psql"),
                 ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE EXTENSION IF NOT EXISTS $extension;")) == 0
-                or die "Could not create extension on worker";
+                or die "Could not create extension $extension on worker port $port.";
+            print "Created extension $extension on worker port $port. \n";
         }
 
         foreach my $function (keys %functions)
@@ -935,7 +941,8 @@ if (!$conninfo)
             system(catfile($bindir, "psql"),
                     ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE FUNCTION $function RETURNS $functions{$function};")) == 0
-                or die "Could not create FUNCTION $function on worker";
+                or die "Could not create function $function on worker port $port";
+            print "Created function $function on worker port $port. \n";
         }
 
         foreach my $fdw (keys %fdws)
@@ -943,25 +950,33 @@ if (!$conninfo)
             system(catfile($bindir, "psql"),
                     ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE FOREIGN DATA WRAPPER $fdw HANDLER $fdws{$fdw};")) == 0
-                or die "Could not create foreign data wrapper $fdw on worker";
+                or die "Could not create foreign data wrapper $fdw on worker port $port";
+            print "Created foreign data wrapper $fdw on worker port $port. \n";
         }
     }
 }
 else
 {
+    system(catfile($bindir, "psql"),
+                ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
+                '-c', "SHOW shared_preload_libraries;"))
+            or die "Could not show shared_preload_libraries on workers";
+
     for my $extension (@extensions)
     {
         system(catfile($bindir, "psql"),
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                 '-c', "SELECT run_command_on_workers('CREATE EXTENSION IF NOT EXISTS $extension;');")) == 0
-            or die "Could not create extension on worker";
+            or die "Could not create extension $extension on workers";
+        print "Created extension $extension on workers. \n";
     }
     foreach my $function (keys %functions)
     {
         system(catfile($bindir, "psql"),
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                     '-c', "SELECT run_command_on_workers('CREATE FUNCTION $function RETURNS $functions{$function};');")) == 0
-            or die "Could not create FUNCTION $function on worker";
+            or die "Could not create function $function on workers.";
+        print "Created function $function on workers. \n";
     }
 
     foreach my $fdw (keys %fdws)
@@ -969,7 +984,8 @@ else
         system(catfile($bindir, "psql"),
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                     '-c', "SELECT run_command_on_workers('CREATE FOREIGN DATA WRAPPER $fdw HANDLER $fdws{$fdw};');")) == 0
-            or die "Could not create foreign data wrapper $fdw on worker";
+            or die "Could not create foreign data wrapper $fdw on workers.";
+        print "Created foreign data wrapper $fdw on workers. \n";
     }
 }
 
