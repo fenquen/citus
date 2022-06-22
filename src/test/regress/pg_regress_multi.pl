@@ -922,10 +922,11 @@ if (!$conninfo)
                 '-c', "CREATE DATABASE regression;")) == 0
             or die "Could not create regression database on worker port $port.";
         print "Created database regression on worker port $port. \n";
-        system(catfile($bindir, "psql"),
-                ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
-                    '-c', "SHOW shared_preload_libraries;")) == 0
-                or die "Could not show shared_preload_libraries on worker $port.";
+
+        my $firstLib = `psql -h "$host" -p "$port" -U "$user" -d regression -AXqt \\
+                        -c "SHOW shared_preload_libraries;" | cut -d ',' -f1`;
+        ($firstLib =~ m/^citus$/)
+            or die "Could not find citus as first library in shared_preload_libraries on worker $port.";
 
         for my $extension (@extensions)
         {
@@ -957,10 +958,11 @@ if (!$conninfo)
 }
 else
 {
-    system(catfile($bindir, "psql"),
-                ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
-                '-c', "SHOW shared_preload_libraries;"))
-            or die "Could not show shared_preload_libraries on workers";
+    my $citusFirstLibCount = `psql -h "$host" -p "$masterPort" -U "$user" -d "$dbname" -AXqt \\
+                                -c "SELECT run_command_on_workers('SHOW shared_preload_libraries;');" \\
+                                | cut -d ',' -f4 | grep -e '\"citus' | wc -l`;
+    ($workerCount == $citusFirstLibCount)
+        or die "Could not find citus as first library in shared_preload_libraries on workers.";
 
     for my $extension (@extensions)
     {
