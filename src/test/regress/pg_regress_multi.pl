@@ -1005,8 +1005,12 @@ for my $extension (@extensions)
     push(@arguments, "--load-extension=$extension");
 }
 
-# Append remaining ARGV arguments to pg_regress arguments
-push(@arguments, @ARGV);
+# Add non-extension flags if test is not vanilla
+if (!$vanillatest)
+{
+    # Append remaining ARGV arguments to pg_regress arguments
+    push(@arguments, @ARGV);
+}
 
 my $startTime = time();
 
@@ -1027,12 +1031,14 @@ if ($vanillatest)
 
 	    my $pgregressdir=catfile(dirname("$pgxsdir"), "regress");
 	    $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
-	           ("--schedule",  catfile("$pgregressdir", "parallel_schedule")))
+                ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
 	}
 	else
 	{
-	    $exitcode = system("make", ("-C", catfile("$postgresBuilddir", "src", "test", "regress"), "installcheck-parallel"))
-	}
+	    my $pgregressdir=catfile("$postgresSrcdir", "src", "test", "regress");
+        $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
+                ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
+    }
 }
 elsif ($isolationtester)
 {
