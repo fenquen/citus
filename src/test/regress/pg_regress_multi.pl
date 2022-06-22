@@ -921,7 +921,6 @@ if (!$conninfo)
             ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "postgres",
                 '-c', "CREATE DATABASE regression;")) == 0
             or die "Could not create regression database on worker port $port.";
-        print "Created database regression on worker port $port. \n";
 
         my $firstLib = `psql -h "$host" -p "$port" -U "$user" -d regression -AXqt \\
                         -c "SHOW shared_preload_libraries;" | cut -d ',' -f1`;
@@ -934,7 +933,6 @@ if (!$conninfo)
                 ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE EXTENSION IF NOT EXISTS $extension;")) == 0
                 or die "Could not create extension $extension on worker port $port.";
-            print "Created extension $extension on worker port $port. \n";
         }
 
         foreach my $function (keys %functions)
@@ -943,7 +941,6 @@ if (!$conninfo)
                     ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE FUNCTION $function RETURNS $functions{$function};")) == 0
                 or die "Could not create function $function on worker port $port";
-            print "Created function $function on worker port $port. \n";
         }
 
         foreach my $fdw (keys %fdws)
@@ -952,7 +949,6 @@ if (!$conninfo)
                     ('-X', '-h', $host, '-p', $port, '-U', $user, "-d", "regression",
                     '-c', "CREATE FOREIGN DATA WRAPPER $fdw HANDLER $fdws{$fdw};")) == 0
                 or die "Could not create foreign data wrapper $fdw on worker port $port";
-            print "Created foreign data wrapper $fdw on worker port $port. \n";
         }
     }
 }
@@ -970,7 +966,6 @@ else
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                 '-c', "SELECT run_command_on_workers('CREATE EXTENSION IF NOT EXISTS $extension;');")) == 0
             or die "Could not create extension $extension on workers";
-        print "Created extension $extension on workers. \n";
     }
     foreach my $function (keys %functions)
     {
@@ -978,7 +973,6 @@ else
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                     '-c', "SELECT run_command_on_workers('CREATE FUNCTION $function RETURNS $functions{$function};');")) == 0
             or die "Could not create function $function on workers.";
-        print "Created function $function on workers. \n";
     }
 
     foreach my $fdw (keys %fdws)
@@ -987,7 +981,6 @@ else
                 ('-X', '-h', $host, '-p', $masterPort, '-U', $user, "-d", $dbname,
                     '-c', "SELECT run_command_on_workers('CREATE FOREIGN DATA WRAPPER $fdw HANDLER $fdws{$fdw};');")) == 0
             or die "Could not create foreign data wrapper $fdw on workers.";
-        print "Created foreign data wrapper $fdw on workers. \n";
     }
 }
 
