@@ -47,6 +47,7 @@
 #include "distributed/local_executor.h"
 #include "distributed/local_distributed_join_planner.h"
 #include "distributed/locally_reserved_shared_connections.h"
+#include "distributed/log_utils.h"
 #include "distributed/maintenanced.h"
 #include "distributed/shard_cleaner.h"
 #include "distributed/metadata_utility.h"
@@ -141,9 +142,6 @@ DEFINE_COLUMNAR_PASSTHROUGH_FUNC(test_columnar_storage_write_new_page)
 
 #define DUMMY_REAL_TIME_EXECUTOR_ENUM_VALUE 9999999
 static char *CitusVersion = CITUS_VERSION;
-
-/* GUC disables citus related preconditions, it is intended to be used in vanilla tests to not break postgres test logs */
-bool DisablePreConditions = false;
 
 /* deprecated GUC value that should not be used anywhere outside this file */
 static int ReplicationModel = REPLICATION_MODEL_STREAMING;
@@ -848,6 +846,16 @@ RegisterCitusConfigVariables(void)
 		&DesiredPercentFreeAfterMove,
 		10.0, 0.0, 100.0,
 		PGC_SIGHUP,
+		GUC_STANDARD,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		"citus.disable_citus_preconditions",
+		gettext_noop("Disables citus related preconditions"),
+		NULL,
+		&DisablePreconditions,
+		false,
+		PGC_USERSET,
 		GUC_STANDARD,
 		NULL, NULL, NULL);
 
@@ -1981,16 +1989,6 @@ RegisterCitusConfigVariables(void)
 		gettext_noop("Enables simple DML via a streaming replica of the coordinator"),
 		NULL,
 		&WritableStandbyCoordinator,
-		false,
-		PGC_USERSET,
-		GUC_STANDARD,
-		NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		"citus.disable_citus_preconditions",
-		gettext_noop("Disables citus related preconditions"),
-		NULL,
-		&DisablePreConditions,
 		false,
 		PGC_USERSET,
 		GUC_STANDARD,

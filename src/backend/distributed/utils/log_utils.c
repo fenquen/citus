@@ -23,6 +23,10 @@
 #endif
 
 
+/* GUC disables citus related preconditions, it is intended to be used in vanilla tests to not break postgres test logs */
+bool DisablePreconditions = false;
+
+
 /*
  * IsLoggableLevel returns true if either of client or server log guc is configured to
  * log the given log level.

@@ -188,6 +188,11 @@ ErrorIfCircularDependencyExists(const ObjectAddress *objectAddress)
 DeferredErrorMessage *
 DeferErrorIfCircularDependencyExists(const ObjectAddress *objectAddress)
 {
+	if (DisablePreconditions)
+	{
+		return NULL;
+	}
+
 	List *dependencies = GetAllSupportedDependenciesForObject(objectAddress);
 
 	ObjectAddress *dependency = NULL;

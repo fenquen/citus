@@ -489,7 +489,7 @@ push(@pgOptions, "citus.executor_slow_start_interval=0ms");
 # we disable citus precondition checks to not break postgres vanilla test behaviour
 if($vanillatest)
 {
-    push(@pgOptions, "citus.disable_citus_preconditions=true"); 
+    push(@pgOptions, "citus.disable_citus_preconditions=true");
 }
 
 if ($useMitmproxy)
@@ -624,6 +624,12 @@ print $fh "--variable=worker_2_proxy_port=$mitmPort ";
 print $fh "--variable=follower_master_port=$followerCoordPort ";
 print $fh "--variable=default_user=$user ";
 print $fh "--variable=SHOW_CONTEXT=always ";
+
+if($vanillatest)
+{
+    print $fh "--variable=SHOW_CONTEXT=errors ";
+}
+
 for my $workeroff (0 .. $#workerPorts)
 {
 	my $port = $workerPorts[$workeroff];
@@ -1034,7 +1040,9 @@ if ($vanillatest)
 	}
 	else
 	{
+        print @arguments;
 	    my $pgregressdir=catfile("$postgresSrcdir", "src", "test", "regress");
+        print $pgregressdir;
         $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
     }

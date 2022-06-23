@@ -30,6 +30,7 @@
 #include "distributed/distribution_column.h"
 #include "distributed/foreign_key_relationship.h"
 #include "distributed/listutils.h"
+#include "distributed/log_utils.h"
 #include "distributed/metadata_sync.h"
 #include "distributed/metadata/dependency.h"
 #include "distributed/metadata/distobject.h"
@@ -47,6 +48,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -1748,10 +1750,13 @@ List *
 PreprocessAlterTableMoveAllStmt(Node *node, const char *queryString,
 								ProcessUtilityContext processUtilityContext)
 {
-	ereport(WARNING, (errmsg("not propagating ALTER TABLE ALL IN TABLESPACE "
-							 "commands to worker nodes"),
-					  errhint("Connect to worker nodes directly to manually "
-							  "move all tables.")));
+	if (!DisablePreconditions)
+	{
+		ereport(WARNING, (errmsg("not propagating ALTER TABLE ALL IN TABLESPACE "
+								 "commands to worker nodes"),
+						  errhint("Connect to worker nodes directly to manually "
+								  "move all tables.")));
+	}
 
 	return NIL;
 }
