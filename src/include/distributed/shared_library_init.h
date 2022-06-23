@@ -22,6 +22,8 @@ extern CompressionTypeStr_type extern_CompressionTypeStr;
 extern IsColumnarTableAmTable_type extern_IsColumnarTableAmTable;
 extern ReadColumnarOptions_type extern_ReadColumnarOptions;
 
+extern bool DisablePreConditions;
+
 extern void StartupCitusBackend(void);
 
 #endif /* SHARED_LIBRARY_INIT_H */

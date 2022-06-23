@@ -142,6 +142,9 @@ DEFINE_COLUMNAR_PASSTHROUGH_FUNC(test_columnar_storage_write_new_page)
 #define DUMMY_REAL_TIME_EXECUTOR_ENUM_VALUE 9999999
 static char *CitusVersion = CITUS_VERSION;
 
+/* GUC disables citus related preconditions, it is intended to be used in vanilla tests to not break postgres test logs */
+bool DisablePreConditions = false;
+
 /* deprecated GUC value that should not be used anywhere outside this file */
 static int ReplicationModel = REPLICATION_MODEL_STREAMING;
 
@@ -1978,6 +1981,16 @@ RegisterCitusConfigVariables(void)
 		gettext_noop("Enables simple DML via a streaming replica of the coordinator"),
 		NULL,
 		&WritableStandbyCoordinator,
+		false,
+		PGC_USERSET,
+		GUC_STANDARD,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		"citus.disable_citus_preconditions",
+		gettext_noop("Disables citus related preconditions"),
+		NULL,
+		&DisablePreConditions,
 		false,
 		PGC_USERSET,
 		GUC_STANDARD,

@@ -486,6 +486,12 @@ push(@pgOptions, "citus.show_shards_for_app_name_prefixes='pg_regress'");
 # we disable slow start by default to encourage parallelism within tests
 push(@pgOptions, "citus.executor_slow_start_interval=0ms");
 
+# we disable citus precondition checks to not break postgres vanilla test behaviour
+if($vanillatest)
+{
+    push(@pgOptions, "citus.disable_citus_preconditions=true"); 
+}
+
 if ($useMitmproxy)
 {
   # make tests reproducible by never trying to negotiate ssl
@@ -1023,13 +1029,13 @@ if ($vanillatest)
 	    mkdir "./testtablespace";
 
 	    my $pgregressdir=catfile(dirname("$pgxsdir"), "regress");
-	    $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
+	    $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
 	}
 	else
 	{
 	    my $pgregressdir=catfile("$postgresSrcdir", "src", "test", "regress");
-        $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
+        $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
     }
 }
