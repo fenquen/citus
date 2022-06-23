@@ -54,7 +54,12 @@ QualifyDropTextSearchConfigurationStmt(Node *node)
 
 		if (!schemaName)
 		{
-			Oid tsconfigOid = get_ts_config_oid(objName, false);
+			Oid tsconfigOid = get_ts_config_oid(objName, true);
+			if (!OidIsValid(tsconfigOid))
+			{
+				return;
+			}
+
 			Oid namespaceOid = get_ts_config_namespace(tsconfigOid);
 			schemaName = get_namespace_name(namespaceOid);
 
@@ -92,7 +97,12 @@ QualifyDropTextSearchDictionaryStmt(Node *node)
 
 		if (!schemaName)
 		{
-			Oid tsdictOid = get_ts_dict_oid(objName, false);
+			Oid tsdictOid = get_ts_dict_oid(objName, true);
+			if (!OidIsValid(tsdictOid))
+			{
+				return;
+			}
+
 			Oid namespaceOid = get_ts_dict_namespace(tsdictOid);
 			schemaName = get_namespace_name(namespaceOid);
 

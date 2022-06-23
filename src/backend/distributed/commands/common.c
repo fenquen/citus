@@ -222,7 +222,13 @@ PreprocessDropDistributedObjectStmt(Node *node, const char *queryString,
 		/* TODO understand if the lock should be sth else */
 		Relation rel = NULL; /* not used, but required to pass to get_object_address */
 		ObjectAddress address = get_object_address(stmt->removeType, object, &rel,
-												   AccessShareLock, stmt->missing_ok);
+												   AccessShareLock, true);
+
+		if (!stmt->missing_ok && !OidIsValid(address.objectId))
+		{
+			return NIL;
+		}
+
 		if (IsObjectDistributed(&address))
 		{
 			ObjectAddress *addressPtr = palloc0(sizeof(ObjectAddress));

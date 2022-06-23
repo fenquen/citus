@@ -708,12 +708,13 @@ ProcessUtilityInternal(PlannedStmt *pstmt,
 		{
 			if (!DisablePreconditions)
 			{
-				ereport(NOTICE, (errmsg("not propagating ALTER ROLE ... RENAME TO commands "
-									"to worker nodes"),
-							 	errhint("Connect to worker nodes directly to manually "
-									 "rename the role")));
+				ereport(NOTICE, (errmsg(
+									 "not propagating ALTER ROLE ... RENAME TO commands "
+									 "to worker nodes"),
+								 errhint("Connect to worker nodes directly to manually "
+										 "rename the role")));
 			}
-			
+
 			return;
 		}
 	}
