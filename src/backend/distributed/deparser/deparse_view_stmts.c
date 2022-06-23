@@ -17,6 +17,7 @@
 #include "distributed/commands.h"
 #include "distributed/deparser.h"
 #include "distributed/listutils.h"
+#include "distributed/log_utils.h"
 #include "lib/stringinfo.h"
 #include "nodes/parsenodes.h"
 #include "utils/builtins.h"
@@ -157,8 +158,13 @@ AppendAlterViewCmd(StringInfo buf, AlterTableCmd *alterTableCmd)
 
 		case AT_ColumnDefault:
 		{
-			elog(ERROR, "Citus doesn't support setting or resetting default values for a "
-						"column of view");
+			if (!DisablePreconditions)
+			{
+				elog(ERROR,
+					 "Citus doesn't support setting or resetting default values for a "
+					 "column of view");
+			}
+
 			break;
 		}
 

@@ -1366,6 +1366,11 @@ PreprocessCreateFunctionStmt(Node *node, const char *queryString,
 List *
 PostprocessCreateFunctionStmt(Node *node, const char *queryString)
 {
+	if (DisablePreconditions)
+	{
+		return NIL;
+	}
+
 	CreateFunctionStmt *stmt = castNode(CreateFunctionStmt, node);
 
 	if (!ShouldPropagateCreateFunction(stmt))

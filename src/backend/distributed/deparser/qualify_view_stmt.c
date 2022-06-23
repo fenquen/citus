@@ -14,6 +14,7 @@
 #include "catalog/namespace.h"
 #include "distributed/deparser.h"
 #include "distributed/listutils.h"
+#include "distributed/log_utils.h"
 #include "nodes/nodes.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -26,6 +27,11 @@ static void QualifyViewRangeVar(RangeVar *view);
 void
 QualifyDropViewStmt(Node *node)
 {
+	if (DisablePreconditions)
+	{
+		return;
+	}
+
 	DropStmt *stmt = castNode(DropStmt, node);
 	List *qualifiedViewNames = NIL;
 

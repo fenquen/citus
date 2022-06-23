@@ -891,7 +891,10 @@ EnsurePrepareTransactionIsAllowed(void)
 		return;
 	}
 
-	ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot use 2PC in transactions involving "
-						   "multiple servers")));
+	if (!DisablePreconditions)
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot use 2PC in transactions involving "
+							   "multiple servers")));
+	}
 }

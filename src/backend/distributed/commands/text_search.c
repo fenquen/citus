@@ -710,16 +710,19 @@ AlterTextSearchConfigurationSchemaStmtObjectAddress(Node *node, bool missing_ok)
 
 		if (!missing_ok && !OidIsValid(objid))
 		{
-			/*
-			 * if the text search config id is still invalid we couldn't find it, error
-			 * with the same message postgres would error with if missing_ok is false
-			 * (not ok to miss)
-			 */
+			if (!DisablePreconditions)
+			{
+				/*
+				 * if the text search config id is still invalid we couldn't find it, error
+				 * with the same message postgres would error with if missing_ok is false
+				 * (not ok to miss)
+				 */
 
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("text search configuration \"%s\" does not exist",
-							NameListToString(castNode(List, stmt->object)))));
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("text search configuration \"%s\" does not exist",
+								NameListToString(castNode(List, stmt->object)))));
+			}
 		}
 	}
 
@@ -763,16 +766,19 @@ AlterTextSearchDictionarySchemaStmtObjectAddress(Node *node, bool missing_ok)
 
 		if (!missing_ok && !OidIsValid(objid))
 		{
-			/*
-			 * if the text search dict id is still invalid we couldn't find it, error
-			 * with the same message postgres would error with if missing_ok is false
-			 * (not ok to miss)
-			 */
+			if (!DisablePreconditions)
+			{
+				/*
+				 * if the text search dict id is still invalid we couldn't find it, error
+				 * with the same message postgres would error with if missing_ok is false
+				 * (not ok to miss)
+				 */
 
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("text search dictionary \"%s\" does not exist",
-							NameListToString(castNode(List, stmt->object)))));
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("text search dictionary \"%s\" does not exist",
+								NameListToString(castNode(List, stmt->object)))));
+			}
 		}
 	}
 

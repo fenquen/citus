@@ -773,7 +773,10 @@ GatherIndexAndConstraintDefinitionList(Form_pg_index indexForm, List **indexDDLE
 		indexForm->indisclustered)
 	{
 		char *clusteredDef = pg_get_indexclusterdef_string(indexId);
-		Assert(clusteredDef != NULL);
+		if (clusteredDef == NULL)
+		{
+			return;
+		}
 
 		*indexDDLEventList = lappend(*indexDDLEventList, makeTableDDLCommandString(
 										 clusteredDef));

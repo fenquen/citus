@@ -328,8 +328,13 @@ ExecuteFunctionOnEachTableIndex(Oid relationId, PGIndexProcessor pgIndexProcesso
 		HeapTuple indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexId));
 		if (!HeapTupleIsValid(indexTuple))
 		{
-			ereport(ERROR, (errmsg("cache lookup failed for index with oid %u",
-								   indexId)));
+			if (!DisablePreconditions)
+			{
+				ereport(ERROR, (errmsg("cache lookup failed for index with oid %u",
+									   indexId)));
+			}
+
+			return NIL;
 		}
 
 		Form_pg_index indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
@@ -529,6 +534,11 @@ List *
 PreprocessReindexStmt(Node *node, const char *reindexCommand,
 					  ProcessUtilityContext processUtilityContext)
 {
+	if (DisablePreconditions)
+	{
+		return NIL;
+	}
+
 	ReindexStmt *reindexStatement = castNode(ReindexStmt, node);
 	List *ddlJobs = NIL;
 

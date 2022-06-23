@@ -266,7 +266,26 @@ PreprocessDropSequenceStmt(Node *node, const char *queryString,
 	{
 		RangeVar *seq = makeRangeVarFromNameList(objectNameList);
 
-		Oid seqOid = RangeVarGetRelid(seq, NoLock, stmt->missing_ok);
+		Oid seqOid = RangeVarGetRelid(seq, NoLock, true);
+
+		if (!stmt->missing_ok && seqOid == InvalidOid)
+		{
+			if (!DisablePreconditions)
+			{
+				/*
+				 * if the sequence is still invalid we couldn't find the sequence, error with the same
+				 * message postgres would error with if missing_ok is false (not ok to miss)
+				 */
+				const char *quotedSequenceName =
+					quote_qualified_identifier(seq->schemaname, seq->relname);
+
+				ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE),
+								errmsg("relation \"%s\" does not exist",
+									   quotedSequenceName)));
+			}
+
+			return NIL;
+		}
 
 		ObjectAddress sequenceAddress = { 0 };
 		ObjectAddressSet(sequenceAddress, RelationRelationId, seqOid);
@@ -542,16 +561,19 @@ AlterSequenceSchemaStmtObjectAddress(Node *node, bool missing_ok)
 
 		if (!missing_ok && seqOid == InvalidOid)
 		{
-			/*
-			 * if the sequence is still invalid we couldn't find the sequence, error with the same
-			 * message postgres would error with if missing_ok is false (not ok to miss)
-			 */
-			const char *quotedSequenceName =
-				quote_qualified_identifier(sequence->schemaname, sequence->relname);
+			if (!DisablePreconditions)
+			{
+				/*
+				 * if the sequence is still invalid we couldn't find the sequence, error with the same
+				 * message postgres would error with if missing_ok is false (not ok to miss)
+				 */
+				const char *quotedSequenceName =
+					quote_qualified_identifier(sequence->schemaname, sequence->relname);
 
-			ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE),
-							errmsg("relation \"%s\" does not exist",
-								   quotedSequenceName)));
+				ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE),
+								errmsg("relation \"%s\" does not exist",
+									   quotedSequenceName)));
+			}
 		}
 	}
 

@@ -255,6 +255,11 @@ List *
 PreprocessAlterStatisticsSchemaStmt(Node *node, const char *queryString,
 									ProcessUtilityContext processUtilityContext)
 {
+	if (DisablePreconditions)
+	{
+		return NIL;
+	}
+
 	AlterObjectSchemaStmt *stmt = castNode(AlterObjectSchemaStmt, node);
 	Assert(stmt->objectType == OBJECT_STATISTIC_EXT);
 

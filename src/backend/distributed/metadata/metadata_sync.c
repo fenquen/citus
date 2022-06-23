@@ -2255,9 +2255,17 @@ GenerateGrantOnFunctionQueriesFromAclItem(Oid functionOid, AclItem *aclItem)
 		}
 		else
 		{
-			ereport(ERROR, (errmsg("unsupported prokind"),
-							errdetail("GRANT commands on procedures are propagated only "
-									  "for procedures and functions.")));
+			if (!DisablePreconditions)
+			{
+				ereport(ERROR, (errmsg("unsupported prokind"),
+								errdetail(
+									"GRANT commands on procedures are propagated only "
+									"for procedures and functions.")));
+			}
+			else
+			{
+				return NIL;
+			}
 		}
 
 		char *query = DeparseTreeNode((Node *) GenerateGrantStmtForRights(
