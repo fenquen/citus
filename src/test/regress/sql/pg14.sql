@@ -12,7 +12,7 @@ SET citus.shard_replication_factor TO 1;
 SET citus.next_shard_id TO 980000;
 SET citus.shard_count TO 2;
 
--- test the new vacuum option, process_toast
+-- test the new vacuum option, process_toast and also auto option for index_cleanup
 CREATE TABLE t1 (a int);
 SELECT create_distributed_table('t1','a');
 SET citus.log_remote_commands TO ON;
@@ -21,6 +21,9 @@ VACUUM (FULL, PROCESS_TOAST) t1;
 VACUUM (FULL, PROCESS_TOAST true) t1;
 VACUUM (FULL, PROCESS_TOAST false) t1;
 VACUUM (PROCESS_TOAST false) t1;
+VACUUM (INDEX_CLEANUP AUTO) t1;
+VACUUM (INDEX_CLEANUP) t1;
+VACUUM (INDEX_CLEANUP AuTo) t1;
 SET citus.log_remote_commands TO OFF;
 
 create table dist(a int, b int);

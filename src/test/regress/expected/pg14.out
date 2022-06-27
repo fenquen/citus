@@ -10,7 +10,7 @@ set search_path to pg14;
 SET citus.shard_replication_factor TO 1;
 SET citus.next_shard_id TO 980000;
 SET citus.shard_count TO 2;
--- test the new vacuum option, process_toast
+-- test the new vacuum option, process_toast and also auto option for index_cleanup
 CREATE TABLE t1 (a int);
 SELECT create_distributed_table('t1','a');
  create_distributed_table
@@ -40,6 +40,21 @@ VACUUM (PROCESS_TOAST false) t1;
 NOTICE:  issuing VACUUM pg14.t1_980000
 DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
 NOTICE:  issuing VACUUM pg14.t1_980001
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+VACUUM (INDEX_CLEANUP AUTO) t1;
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980000
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980001
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+VACUUM (INDEX_CLEANUP) t1;
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980000
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980001
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+VACUUM (INDEX_CLEANUP AuTo) t1;
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980000
+DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
+NOTICE:  issuing VACUUM (INDEX_CLEANUP auto) pg14.t1_980001
 DETAIL:  on server postgres@localhost:xxxxx connectionId: xxxxxxx
 SET citus.log_remote_commands TO OFF;
 create table dist(a int, b int);
