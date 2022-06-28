@@ -11,6 +11,7 @@
 
 #include "distributed/pg_version_constants.h"
 
+#include "common/hashfn.h"
 #include "funcapi.h"
 
 #include <float.h>
@@ -20,6 +21,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "distributed/citus_meta_visibility.h"
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/citus_nodes.h"
 #include "distributed/citus_ruleutils.h"
@@ -30,6 +32,7 @@
 #include "distributed/intermediate_result_pruning.h"
 #include "distributed/intermediate_results.h"
 #include "distributed/listutils.h"
+#include "distributed/log_utils.h"
 #include "distributed/coordinator_protocol.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_executor.h"
@@ -127,7 +130,6 @@ static RTEListProperties * GetRTEListProperties(List *rangeTableList);
 static List * TranslatedVars(PlannerInfo *root, int relationIndex);
 static void WarnIfListHasForeignDistributedTable(List *rangeTableList);
 
-
 /* Distributed planner hook */
 PlannedStmt *
 distributed_planner(Query *parse,
@@ -142,6 +144,11 @@ distributed_planner(Query *parse,
 	Node *distributionKeyValue = NULL;
 
 	List *rangeTableList = ExtractRangeTableEntryList(parse);
+
+	if (DisablePreconditions && CitusHasBeenLoaded())
+	{
+		FilterCitusObjectsFromPgMetaTable((Node *) parse, NULL);
+	}
 
 	if (cursorOptions & CURSOR_OPT_FORCE_DISTRIBUTED)
 	{

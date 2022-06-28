@@ -1040,9 +1040,7 @@ if ($vanillatest)
 	}
 	else
 	{
-        print @arguments;
 	    my $pgregressdir=catfile("$postgresSrcdir", "src", "test", "regress");
-        print $pgregressdir;
         $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
     }

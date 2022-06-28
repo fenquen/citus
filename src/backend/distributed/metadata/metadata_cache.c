@@ -184,6 +184,7 @@ typedef struct MetadataCacheData
 	Oid relationIsAKnownShardFuncId;
 	Oid jsonbExtractPathFuncId;
 	Oid jsonbExtractPathTextFuncId;
+	Oid FilteredCitusObjectFuncId;
 	bool databaseNameValid;
 	char databaseName[NAMEDATALEN];
 } MetadataCacheData;
@@ -2895,6 +2896,24 @@ JsonbExtractPathTextFuncId(void)
 	}
 
 	return MetadataCache.jsonbExtractPathTextFuncId;
+}
+
+
+/*
+ * FilteredCitusObjectFuncId returns oid of the is_filtered_citus_object function.
+ */
+Oid
+FilteredCitusObjectFuncId(void)
+{
+	if (MetadataCache.FilteredCitusObjectFuncId == InvalidOid)
+	{
+		const int argCount = 2;
+
+		MetadataCache.FilteredCitusObjectFuncId =
+			FunctionOid("pg_catalog", "is_filtered_citus_object", argCount);
+	}
+
+	return MetadataCache.FilteredCitusObjectFuncId;
 }
 
 
