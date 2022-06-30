@@ -345,12 +345,18 @@ CreateEnumStmtObjectAddress(Node *node, bool missing_ok)
 ObjectAddress
 AlterTypeStmtObjectAddress(Node *node, bool missing_ok)
 {
+	ObjectAddress address = { 0 };
+
+	if (DisablePreconditions)
+	{
+		return address;
+	}
+
 	AlterTableStmt *stmt = castNode(AlterTableStmt, node);
 	Assert(AlterTableStmtObjType_compat(stmt) == OBJECT_TYPE);
 
 	TypeName *typeName = MakeTypeNameFromRangeVar(stmt->relation);
 	Oid typeOid = LookupTypeNameOid(NULL, typeName, missing_ok);
-	ObjectAddress address = { 0 };
 	ObjectAddressSet(address, TypeRelationId, typeOid);
 
 	return address;

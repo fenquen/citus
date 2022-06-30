@@ -207,11 +207,14 @@ distributed_planner(Query *parse,
 		}
 	}
 
-	/*
-	 * Make sure that we hide shard names on the Citus MX worker nodes. See comments in
-	 * HideShardsFromSomeApplications() for the details.
-	 */
-	HideShardsFromSomeApplications(parse);
+	if (!DisablePreconditions)
+	{
+		/*
+		 * Make sure that we hide shard names on the Citus MX worker nodes. See comments in
+		 * HideShardsFromSomeApplications() for the details.
+		 */
+		HideShardsFromSomeApplications(parse);
+	}
 
 	/* create a restriction context and put it at the end if context list */
 	planContext.plannerRestrictionContext = CreateAndPushPlannerRestrictionContext();

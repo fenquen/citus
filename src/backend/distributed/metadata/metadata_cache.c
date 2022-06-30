@@ -2907,7 +2907,7 @@ FilteredCitusObjectFuncId(void)
 {
 	if (MetadataCache.FilteredCitusObjectFuncId == InvalidOid)
 	{
-		const int argCount = 2;
+		const int argCount = 3;
 
 		MetadataCache.FilteredCitusObjectFuncId =
 			FunctionOid("pg_catalog", "is_filtered_citus_object", argCount);

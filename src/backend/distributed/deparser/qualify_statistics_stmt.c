@@ -80,7 +80,7 @@ QualifyDropStatisticsStmt(Node *node)
 		{
 			Oid statsOid = get_statistics_object_oid(objectNameList, true);
 
-			if (!dropStatisticsStmt->missing_ok && OidIsValid(statsOid))
+			if (!dropStatisticsStmt->missing_ok && !OidIsValid(statsOid))
 			{
 				return;
 			}

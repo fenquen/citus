@@ -41,6 +41,11 @@
 List *
 PostprocessCreateDistributedObjectFromCatalogStmt(Node *stmt, const char *queryString)
 {
+	if (DisablePreconditions)
+	{
+		return NIL;
+	}
+
 	const DistributeObjectOps *ops = GetDistributeObjectOps(stmt);
 	Assert(ops != NULL);
 

@@ -1035,13 +1035,13 @@ if ($vanillatest)
 	    mkdir "./testtablespace";
 
 	    my $pgregressdir=catfile(dirname("$pgxsdir"), "regress");
-	    $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
+	    $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
 	}
 	else
 	{
 	    my $pgregressdir=catfile("$postgresSrcdir", "src", "test", "regress");
-        $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir), ("--outputdir", $pgregressdir),
+        $exitcode = system("$plainRegress", ("--inputdir",  $pgregressdir),
                 ("--schedule",  catfile("$pgregressdir", "parallel_schedule")), @arguments)
     }
 }

@@ -25,6 +25,7 @@
 #include "catalog/pg_type.h"
 #include "distributed/commands.h"
 #include "distributed/deparser.h"
+#include "distributed/log_utils.h"
 #include "distributed/version_compat.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_type.h"
@@ -122,6 +123,11 @@ QualifyAlterEnumStmt(Node *node)
 void
 QualifyAlterTypeStmt(Node *node)
 {
+	if (DisablePreconditions)
+	{
+		return;
+	}
+
 	AlterTableStmt *stmt = castNode(AlterTableStmt, node);
 	Assert(AlterTableStmtObjType_compat(stmt) == OBJECT_TYPE);
 

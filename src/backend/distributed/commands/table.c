@@ -427,6 +427,11 @@ List *
 PreprocessAlterTableStmtAttachPartition(AlterTableStmt *alterTableStatement,
 										const char *queryString)
 {
+	if (DisablePreconditions)
+	{
+		return NIL;
+	}
+
 	List *commandList = alterTableStatement->cmds;
 	AlterTableCmd *alterTableCommand = NULL;
 	foreach_ptr(alterTableCommand, commandList)
