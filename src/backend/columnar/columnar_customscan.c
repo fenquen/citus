@@ -121,10 +121,8 @@ static void ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestor
 static const char * ColumnarPushdownClausesStr(List *context, List *clauses);
 static const char * ColumnarProjectedColumnsStr(List *context,
 												List *projectedColumns);
-#if PG_VERSION_NUM >= 130000
 static List * set_deparse_context_planstate(List *dpcontext, Node *node,
 											List *ancestors);
-#endif
 
 /* other helpers */
 static List * ColumnarVarNeeded(ColumnarScanState *columnarScanState);
@@ -1961,8 +1959,6 @@ ColumnarVarNeeded(ColumnarScanState *columnarScanState)
 }
 
 
-#if PG_VERSION_NUM >= 130000
-
 /*
  * set_deparse_context_planstate is a compatibility wrapper for versions 13+.
  */
@@ -1972,6 +1968,3 @@ set_deparse_context_planstate(List *dpcontext, Node *node, List *ancestors)
 	PlanState *ps = (PlanState *) node;
 	return set_deparse_context_plan(dpcontext, ps->plan, ancestors);
 }
-
-
-#endif

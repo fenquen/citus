@@ -67,11 +67,7 @@ PreprocessClusterStmt(Node *node, const char *clusterCommand,
 		return NIL;
 	}
 
-#if PG_VERSION_NUM >= 120000
 	if (IsClusterStmtVerbose_compat(clusterStmt))
-#else
-	if (clusterStmt->verbose)
-#endif
 	{
 		ereport(ERROR, (errmsg("cannot run CLUSTER command"),
 						errdetail("VERBOSE option is currently unsupported "
