@@ -33,6 +33,7 @@
 static void MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters);
 
 PG_FUNCTION_INFO_V1(columnar_store_memory_stats);
+
 PG_FUNCTION_INFO_V1(columnar_storage_info);
 
 
@@ -41,38 +42,37 @@ PG_FUNCTION_INFO_V1(columnar_storage_info);
  * TopMemoryContext, TopTransactionContext, and Write State context.
  */
 Datum
-columnar_store_memory_stats(PG_FUNCTION_ARGS)
-{
-	const int resultColumnCount = 3;
+columnar_store_memory_stats(PG_FUNCTION_ARGS) {
+    const int resultColumnCount = 3;
 
-	TupleDesc tupleDescriptor = CreateTemplateTupleDesc(resultColumnCount);
+    TupleDesc tupleDescriptor = CreateTemplateTupleDesc(resultColumnCount);
 
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 1, "TopMemoryContext",
-					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 2, "TopTransactionContext",
-					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 3, "WriteStateContext",
-					   INT8OID, -1, 0);
+    TupleDescInitEntry(tupleDescriptor, (AttrNumber) 1, "TopMemoryContext",
+                       INT8OID, -1, 0);
+    TupleDescInitEntry(tupleDescriptor, (AttrNumber) 2, "TopTransactionContext",
+                       INT8OID, -1, 0);
+    TupleDescInitEntry(tupleDescriptor, (AttrNumber) 3, "WriteStateContext",
+                       INT8OID, -1, 0);
 
-	MemoryContextCounters transactionCounters = { 0 };
-	MemoryContextCounters topCounters = { 0 };
-	MemoryContextCounters writeStateCounters = { 0 };
-	MemoryContextTotals(TopTransactionContext, &transactionCounters);
-	MemoryContextTotals(TopMemoryContext, &topCounters);
-	MemoryContextTotals(GetWriteContextForDebug(), &writeStateCounters);
+    MemoryContextCounters transactionCounters = {0};
+    MemoryContextCounters topCounters = {0};
+    MemoryContextCounters writeStateCounters = {0};
+    MemoryContextTotals(TopTransactionContext, &transactionCounters);
+    MemoryContextTotals(TopMemoryContext, &topCounters);
+    MemoryContextTotals(GetWriteContextForDebug(), &writeStateCounters);
 
-	bool nulls[3] = { false };
-	Datum values[3] = {
-		Int64GetDatum(topCounters.totalspace),
-		Int64GetDatum(transactionCounters.totalspace),
-		Int64GetDatum(writeStateCounters.totalspace)
-	};
+    bool nulls[3] = {false};
+    Datum values[3] = {
+            Int64GetDatum(topCounters.totalspace),
+            Int64GetDatum(transactionCounters.totalspace),
+            Int64GetDatum(writeStateCounters.totalspace)
+    };
 
-	Tuplestorestate *tupleStore = SetupTuplestore(fcinfo, &tupleDescriptor);
-	tuplestore_putvalues(tupleStore, tupleDescriptor, values, nulls);
-	tuplestore_donestoring(tupleStore);
+    Tuplestorestate *tupleStore = SetupTuplestore(fcinfo, &tupleDescriptor);
+    tuplestore_putvalues(tupleStore, tupleDescriptor, values, nulls);
+    tuplestore_donestoring(tupleStore);
 
-	PG_RETURN_DATUM(0);
+    PG_RETURN_DATUM(0);
 }
 
 
@@ -92,55 +92,51 @@ columnar_store_memory_stats(PG_FUNCTION_ARGS)
  *    LANGUAGE c AS 'MODULE_PATHNAME', 'columnar_storage_info';
  */
 Datum
-columnar_storage_info(PG_FUNCTION_ARGS)
-{
+columnar_storage_info(PG_FUNCTION_ARGS) {
 #define STORAGE_INFO_NATTS 6
-	Oid relid = PG_GETARG_OID(0);
-	TupleDesc tupdesc;
+    Oid relid = PG_GETARG_OID(0);
+    TupleDesc tupdesc;
 
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-	{
-		elog(ERROR, "return type must be a row type");
-	}
+    /* Build a tuple descriptor for our result type */
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        elog(ERROR, "return type must be a row type");
+    }
 
-	if (tupdesc->natts != STORAGE_INFO_NATTS)
-	{
-		elog(ERROR, "return type must have %d columns", STORAGE_INFO_NATTS);
-	}
+    if (tupdesc->natts != STORAGE_INFO_NATTS) {
+        elog(ERROR, "return type must have %d columns", STORAGE_INFO_NATTS);
+    }
 
-	Relation rel = table_open(relid, AccessShareLock);
-	if (!IsColumnarTableAmTable(relid))
-	{
-		ereport(ERROR, (errmsg("table \"%s\" is not a columnar table",
-							   RelationGetRelationName(rel))));
-	}
+    Relation rel = table_open(relid, AccessShareLock);
+    if (!IsColumnarTableAmTable(relid)) {
+        ereport(ERROR, (errmsg("table \"%s\" is not a columnar table",
+                               RelationGetRelationName(rel))));
+    }
 
-	RelationOpenSmgr(rel);
+    RelationOpenSmgr(rel);
 
-	Datum values[STORAGE_INFO_NATTS] = { 0 };
-	bool nulls[STORAGE_INFO_NATTS] = { 0 };
+    Datum values[STORAGE_INFO_NATTS] = {0};
+    bool nulls[STORAGE_INFO_NATTS] = {0};
 
-	/*
-	 * Pass force = true so that we can inspect metapages that are not the
-	 * current version.
-	 *
-	 * NB: ensure the order and number of attributes correspond to DDL
-	 * declaration.
-	 */
-	values[0] = Int32GetDatum(ColumnarStorageGetVersionMajor(rel, true));
-	values[1] = Int32GetDatum(ColumnarStorageGetVersionMinor(rel, true));
-	values[2] = Int64GetDatum(ColumnarStorageGetStorageId(rel, true));
-	values[3] = Int64GetDatum(ColumnarStorageGetReservedStripeId(rel, true));
-	values[4] = Int64GetDatum(ColumnarStorageGetReservedRowNumber(rel, true));
-	values[5] = Int64GetDatum(ColumnarStorageGetReservedOffset(rel, true));
+    /*
+     * Pass force = true so that we can inspect metapages that are not the
+     * current version.
+     *
+     * NB: ensure the order and number of attributes correspond to DDL
+     * declaration.
+     */
+    values[0] = Int32GetDatum(ColumnarStorageGetVersionMajor(rel, true));
+    values[1] = Int32GetDatum(ColumnarStorageGetVersionMinor(rel, true));
+    values[2] = Int64GetDatum(ColumnarStorageGetStorageId(rel, true));
+    values[3] = Int64GetDatum(ColumnarStorageGetReservedStripeId(rel, true));
+    values[4] = Int64GetDatum(ColumnarStorageGetReservedRowNumber(rel, true));
+    values[5] = Int64GetDatum(ColumnarStorageGetReservedOffset(rel, true));
 
-	/* release lock */
-	table_close(rel, AccessShareLock);
+    /* release lock */
+    table_close(rel, AccessShareLock);
 
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+    HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 
@@ -149,18 +145,15 @@ columnar_storage_info(PG_FUNCTION_ARGS)
  * subtree to the given counters.
  */
 static void
-MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters)
-{
-	if (context == NULL)
-	{
-		return;
-	}
+MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters) {
+    if (context == NULL) {
+        return;
+    }
 
-	MemoryContext child;
-	for (child = context->firstchild; child != NULL; child = child->nextchild)
-	{
-		MemoryContextTotals(child, counters);
-	}
+    MemoryContext child;
+    for (child = context->firstchild; child != NULL; child = child->nextchild) {
+        MemoryContextTotals(child, counters);
+    }
 
-	context->methods->stats_compat(context, NULL, NULL, counters, true);
+    context->methods->stats_compat(context, NULL, NULL, counters, true);
 }

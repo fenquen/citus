@@ -41,71 +41,70 @@ int columnar_chunk_group_row_limit = DEFAULT_CHUNK_ROW_COUNT;
 int columnar_compression_level = 3;
 
 static const struct config_enum_entry columnar_compression_options[] =
-{
-	{ "none", COMPRESSION_NONE, false },
-	{ "pglz", COMPRESSION_PG_LZ, false },
+        {
+                {"none", COMPRESSION_NONE, false},
+                {"pglz", COMPRESSION_PG_LZ, false},
 #if HAVE_CITUS_LIBLZ4
-	{ "lz4", COMPRESSION_LZ4, false },
+                {"lz4", COMPRESSION_LZ4, false},
 #endif
 #if HAVE_LIBZSTD
-	{ "zstd", COMPRESSION_ZSTD, false },
+                {"zstd", COMPRESSION_ZSTD, false},
 #endif
-	{ NULL, 0, false }
-};
+                {NULL, 0, false}
+        };
 
 void
-columnar_init_gucs()
-{
-	DefineCustomEnumVariable("columnar.compression",
-							 "Compression type for columnar.",
-							 NULL,
-							 &columnar_compression,
-							 DEFAULT_COMPRESSION_TYPE,
-							 columnar_compression_options,
-							 PGC_USERSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
+columnar_init_gucs() {
+    DefineCustomEnumVariable("columnar.compression",
+                             "Compression type for columnar.",
+                             NULL,
+                             &columnar_compression,
+                             DEFAULT_COMPRESSION_TYPE,
+                             columnar_compression_options,
+                             PGC_USERSET,
+                             0,
+                             NULL,
+                             NULL,
+                             NULL);
 
-	DefineCustomIntVariable("columnar.compression_level",
-							"Compression level to be used with zstd.",
-							NULL,
-							&columnar_compression_level,
-							3,
-							COMPRESSION_LEVEL_MIN,
-							COMPRESSION_LEVEL_MAX,
-							PGC_USERSET,
-							0,
-							NULL,
-							NULL,
-							NULL);
+    DefineCustomIntVariable("columnar.compression_level",
+                            "Compression level to be used with zstd.",
+                            NULL,
+                            &columnar_compression_level,
+                            3,
+                            COMPRESSION_LEVEL_MIN,
+                            COMPRESSION_LEVEL_MAX,
+                            PGC_USERSET,
+                            0,
+                            NULL,
+                            NULL,
+                            NULL);
 
-	DefineCustomIntVariable("columnar.stripe_row_limit",
-							"Maximum number of tuples per stripe.",
-							NULL,
-							&columnar_stripe_row_limit,
-							DEFAULT_STRIPE_ROW_COUNT,
-							STRIPE_ROW_COUNT_MINIMUM,
-							STRIPE_ROW_COUNT_MAXIMUM,
-							PGC_USERSET,
-							0,
-							NULL,
-							NULL,
-							NULL);
+    DefineCustomIntVariable("columnar.stripe_row_limit",
+                            "Maximum number of tuples per stripe.",
+                            NULL,
+                            &columnar_stripe_row_limit,
+                            DEFAULT_STRIPE_ROW_COUNT,
+                            STRIPE_ROW_COUNT_MINIMUM,
+                            STRIPE_ROW_COUNT_MAXIMUM,
+                            PGC_USERSET,
+                            0,
+                            NULL,
+                            NULL,
+                            NULL);
 
-	DefineCustomIntVariable("columnar.chunk_group_row_limit",
-							"Maximum number of rows per chunk.",
-							NULL,
-							&columnar_chunk_group_row_limit,
-							DEFAULT_CHUNK_ROW_COUNT,
-							CHUNK_ROW_COUNT_MINIMUM,
-							CHUNK_ROW_COUNT_MAXIMUM,
-							PGC_USERSET,
-							0,
-							NULL,
-							NULL,
-							NULL);
+    DefineCustomIntVariable("columnar.chunk_group_row_limit",
+                            "Maximum number of rows per chunk.",
+                            NULL,
+                            &columnar_chunk_group_row_limit,
+                            DEFAULT_CHUNK_ROW_COUNT,
+                            CHUNK_ROW_COUNT_MINIMUM,
+                            CHUNK_ROW_COUNT_MAXIMUM,
+                            PGC_USERSET,
+                            0,
+                            NULL,
+                            NULL,
+                            NULL);
 }
 
 
@@ -115,22 +114,19 @@ columnar_init_gucs()
  * returns COMPRESSION_TYPE_INVALID.
  */
 CompressionType
-ParseCompressionType(const char *compressionTypeString)
-{
-	Assert(compressionTypeString != NULL);
+ParseCompressionType(const char *compressionTypeString) {
+    Assert(compressionTypeString != NULL);
 
-	for (int compressionIndex = 0;
-		 columnar_compression_options[compressionIndex].name != NULL;
-		 compressionIndex++)
-	{
-		const char *compressionName = columnar_compression_options[compressionIndex].name;
-		if (strncmp(compressionTypeString, compressionName, NAMEDATALEN) == 0)
-		{
-			return columnar_compression_options[compressionIndex].val;
-		}
-	}
+    for (int compressionIndex = 0;
+         columnar_compression_options[compressionIndex].name != NULL;
+         compressionIndex++) {
+        const char *compressionName = columnar_compression_options[compressionIndex].name;
+        if (strncmp(compressionTypeString, compressionName, NAMEDATALEN) == 0) {
+            return columnar_compression_options[compressionIndex].val;
+        }
+    }
 
-	return COMPRESSION_TYPE_INVALID;
+    return COMPRESSION_TYPE_INVALID;
 }
 
 
@@ -140,19 +136,16 @@ ParseCompressionType(const char *compressionTypeString)
  * returns NULL.
  */
 const char *
-CompressionTypeStr(CompressionType requestedType)
-{
-	for (int compressionIndex = 0;
-		 columnar_compression_options[compressionIndex].name != NULL;
-		 compressionIndex++)
-	{
-		CompressionType compressionType =
-			columnar_compression_options[compressionIndex].val;
-		if (compressionType == requestedType)
-		{
-			return columnar_compression_options[compressionIndex].name;
-		}
-	}
+CompressionTypeStr(CompressionType requestedType) {
+    for (int compressionIndex = 0;
+         columnar_compression_options[compressionIndex].name != NULL;
+         compressionIndex++) {
+        CompressionType compressionType =
+                columnar_compression_options[compressionIndex].val;
+        if (compressionType == requestedType) {
+            return columnar_compression_options[compressionIndex].name;
+        }
+    }
 
-	return NULL;
+    return NULL;
 }

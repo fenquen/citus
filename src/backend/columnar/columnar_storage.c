@@ -51,46 +51,44 @@
  * Content of the first page in main fork, which stores metadata at file
  * level.
  */
-typedef struct ColumnarMetapage
-{
-	/*
-	 * Store version of file format used, so we can detect files from
-	 * previous versions if we change file format.
-	 */
-	uint32 versionMajor;
-	uint32 versionMinor;
+typedef struct ColumnarMetapage {
+    /*
+     * Store version of file format used, so we can detect files from
+     * previous versions if we change file format.
+     */
+    uint32 versionMajor;
+    uint32 versionMinor;
 
-	/*
-	 * Each of the metadata table rows are identified by a storageId.
-	 * We store it also in the main fork so we can link metadata rows
-	 * with data files.
-	 */
-	uint64 storageId;
+    /*
+     * Each of the metadata table rows are identified by a storageId.
+     * We store it also in the main fork so we can link metadata rows
+     * with data files.
+     */
+    uint64 storageId;
 
-	uint64 reservedStripeId; /* first unused stripe id */
-	uint64 reservedRowNumber; /* first unused row number */
-	uint64 reservedOffset; /* first unused byte offset */
+    uint64 reservedStripeId; /* first unused stripe id */
+    uint64 reservedRowNumber; /* first unused row number */
+    uint64 reservedOffset; /* first unused byte offset */
 
-	/*
-	 * Flag set to true in the init fork. After an unlogged table reset (due
-	 * to a crash), the init fork will be copied over the main fork. When
-	 * trying to read an unlogged table, if this flag is set to true, we must
-	 * clear the metadata for the table (because the actual data is gone,
-	 * too), and clear the flag. We can cross-check that the table is
-	 * UNLOGGED, and that the main fork is at the minimum size (no actual
-	 * data).
-	 *
-	 * XXX: Not used yet; reserved field for later support for UNLOGGED.
-	 */
-	bool unloggedReset;
+    /*
+     * Flag set to true in the init fork. After an unlogged table reset (due
+     * to a crash), the init fork will be copied over the main fork. When
+     * trying to read an unlogged table, if this flag is set to true, we must
+     * clear the metadata for the table (because the actual data is gone,
+     * too), and clear the flag. We can cross-check that the table is
+     * UNLOGGED, and that the main fork is at the minimum size (no actual
+     * data).
+     *
+     * XXX: Not used yet; reserved field for later support for UNLOGGED.
+     */
+    bool unloggedReset;
 } ColumnarMetapage;
 
 
 /* represents a "physical" block+offset address */
-typedef struct PhysicalAddr
-{
-	BlockNumber blockno;
-	uint32 offset;
+typedef struct PhysicalAddr {
+    BlockNumber blockno;
+    uint32 offset;
 } PhysicalAddr;
 
 
@@ -101,7 +99,7 @@ typedef struct PhysicalAddr
 
 
 #define OLD_METAPAGE_VERSION_HINT "Use \"VACUUM\" to upgrade the columnar table format " \
-								  "version or run \"ALTER EXTENSION citus UPDATE\"."
+                                  "version or run \"ALTER EXTENSION citus UPDATE\"."
 
 
 /* only for testing purposes */
@@ -112,14 +110,13 @@ PG_FUNCTION_INFO_V1(test_columnar_storage_write_new_page);
  * Map logical offsets to a physical page and offset where the data is kept.
  */
 static inline PhysicalAddr
-LogicalToPhysical(uint64 logicalOffset)
-{
-	PhysicalAddr addr;
+LogicalToPhysical(uint64 logicalOffset) {
+    PhysicalAddr addr;
 
-	addr.blockno = logicalOffset / COLUMNAR_BYTES_PER_PAGE;
-	addr.offset = SizeOfPageHeaderData + (logicalOffset % COLUMNAR_BYTES_PER_PAGE);
+    addr.blockno = logicalOffset / COLUMNAR_BYTES_PER_PAGE;
+    addr.offset = SizeOfPageHeaderData + (logicalOffset % COLUMNAR_BYTES_PER_PAGE);
 
-	return addr;
+    return addr;
 }
 
 
@@ -127,23 +124,30 @@ LogicalToPhysical(uint64 logicalOffset)
  * Map a physical page and offset address to a logical address.
  */
 static inline uint64
-PhysicalToLogical(PhysicalAddr addr)
-{
-	return COLUMNAR_BYTES_PER_PAGE * addr.blockno + addr.offset - SizeOfPageHeaderData;
+PhysicalToLogical(PhysicalAddr addr) {
+    return COLUMNAR_BYTES_PER_PAGE * addr.blockno + addr.offset - SizeOfPageHeaderData;
 }
 
 
 static void ColumnarOverwriteMetapage(Relation relation,
-									  ColumnarMetapage columnarMetapage);
+                                      ColumnarMetapage columnarMetapage);
+
 static ColumnarMetapage ColumnarMetapageRead(Relation rel, bool force);
+
 static void ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset,
-						  char *buf, uint32 len, bool force);
+                          char *buf, uint32 len, bool force);
+
 static void WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset,
-						 char *buf, uint32 len, bool clear);
+                         char *buf, uint32 len, bool clear);
+
 static uint64 AlignReservation(uint64 prevReservation);
+
 static bool ColumnarMetapageIsCurrent(ColumnarMetapage *metapage);
+
 static bool ColumnarMetapageIsOlder(ColumnarMetapage *metapage);
+
 static bool ColumnarMetapageIsNewer(ColumnarMetapage *metapage);
+
 static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage);
 
 
@@ -154,56 +158,54 @@ static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapag
  * Caller must hold AccessExclusiveLock on the relation.
  */
 void
-ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
-{
-	BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
+ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
+    BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
-	if (nblocks > 0)
-	{
-		elog(ERROR,
-			 "attempted to initialize metapage, but %d pages already exist",
-			 nblocks);
-	}
+    if (nblocks > 0) {
+        elog(ERROR,
+             "attempted to initialize metapage, but %d pages already exist",
+             nblocks);
+    }
 
-	/* create two pages */
-	PGAlignedBlock block;
-	Page page = block.data;
+    /* create two pages */
+    PGAlignedBlock block;
+    Page page = block.data;
 
-	/* write metapage */
-	PageInit(page, BLCKSZ, 0);
-	PageHeader phdr = (PageHeader) page;
+    /* write metapage */
+    PageInit(page, BLCKSZ, 0);
+    PageHeader phdr = (PageHeader) page;
 
-	ColumnarMetapage metapage = { 0 };
-	metapage.storageId = storageId;
-	metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
-	metapage.versionMinor = COLUMNAR_VERSION_MINOR;
-	metapage.reservedStripeId = COLUMNAR_FIRST_STRIPE_ID;
-	metapage.reservedRowNumber = COLUMNAR_FIRST_ROW_NUMBER;
-	metapage.reservedOffset = ColumnarFirstLogicalOffset;
-	metapage.unloggedReset = false;
-	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
-			 (char *) &metapage, sizeof(ColumnarMetapage));
-	phdr->pd_lower += sizeof(ColumnarMetapage);
+    ColumnarMetapage metapage = {0};
+    metapage.storageId = storageId;
+    metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
+    metapage.versionMinor = COLUMNAR_VERSION_MINOR;
+    metapage.reservedStripeId = COLUMNAR_FIRST_STRIPE_ID;
+    metapage.reservedRowNumber = COLUMNAR_FIRST_ROW_NUMBER;
+    metapage.reservedOffset = ColumnarFirstLogicalOffset;
+    metapage.unloggedReset = false;
+    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
+             (char *) &metapage, sizeof(ColumnarMetapage));
+    phdr->pd_lower += sizeof(ColumnarMetapage);
 
-	PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
-	smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
-	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-				COLUMNAR_METAPAGE_BLOCKNO, page, true);
+    PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
+    smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
+    log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
+                COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
-	/* write empty page */
-	PageInit(page, BLCKSZ, 0);
+    /* write empty page */
+    PageInit(page, BLCKSZ, 0);
 
-	PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
-	smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
-	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-				COLUMNAR_EMPTY_BLOCKNO, page, true);
+    PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
+    smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
+    log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
+                COLUMNAR_EMPTY_BLOCKNO, page, true);
 
-	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
-	smgrimmedsync(srel, MAIN_FORKNUM);
+    /*
+     * An immediate sync is required even if we xlog'd the page, because the
+     * write did not go through shared_buffers and therefore a concurrent
+     * checkpoint may have moved the redo pointer past our xlog record.
+     */
+    smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
 
@@ -218,39 +220,35 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
  */
 void
 ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64 reservedStripeId,
-							 uint64 reservedRowNumber, uint64 reservedOffset)
-{
-	LockRelationForExtension(rel, ExclusiveLock);
+                             uint64 reservedRowNumber, uint64 reservedOffset) {
+    LockRelationForExtension(rel, ExclusiveLock);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, true);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, true);
 
-	if (ColumnarMetapageIsCurrent(&metapage))
-	{
-		/* nothing to do */
-		return;
-	}
+    if (ColumnarMetapageIsCurrent(&metapage)) {
+        /* nothing to do */
+        return;
+    }
 
-	if (upgrade && ColumnarMetapageIsNewer(&metapage))
-	{
-		elog(ERROR, "found newer columnar metapage while upgrading");
-	}
+    if (upgrade && ColumnarMetapageIsNewer(&metapage)) {
+        elog(ERROR, "found newer columnar metapage while upgrading");
+    }
 
-	if (!upgrade && ColumnarMetapageIsOlder(&metapage))
-	{
-		elog(ERROR, "found older columnar metapage while downgrading");
-	}
+    if (!upgrade && ColumnarMetapageIsOlder(&metapage)) {
+        elog(ERROR, "found older columnar metapage while downgrading");
+    }
 
-	metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
-	metapage.versionMinor = COLUMNAR_VERSION_MINOR;
+    metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
+    metapage.versionMinor = COLUMNAR_VERSION_MINOR;
 
-	/* storageId remains the same */
-	metapage.reservedStripeId = reservedStripeId;
-	metapage.reservedRowNumber = reservedRowNumber;
-	metapage.reservedOffset = reservedOffset;
+    /* storageId remains the same */
+    metapage.reservedStripeId = reservedStripeId;
+    metapage.reservedRowNumber = reservedRowNumber;
+    metapage.reservedOffset = reservedOffset;
 
-	ColumnarOverwriteMetapage(rel, metapage);
+    ColumnarOverwriteMetapage(rel, metapage);
 
-	UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(rel, ExclusiveLock);
 }
 
 
@@ -261,11 +259,10 @@ ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64 reservedStripeId
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetVersionMajor(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetVersionMajor(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.versionMajor;
+    return metapage.versionMajor;
 }
 
 
@@ -276,11 +273,10 @@ ColumnarStorageGetVersionMajor(Relation rel, bool force)
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetVersionMinor(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetVersionMinor(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.versionMinor;
+    return metapage.versionMinor;
 }
 
 
@@ -291,11 +287,10 @@ ColumnarStorageGetVersionMinor(Relation rel, bool force)
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetStorageId(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetStorageId(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.storageId;
+    return metapage.storageId;
 }
 
 
@@ -307,11 +302,10 @@ ColumnarStorageGetStorageId(Relation rel, bool force)
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetReservedStripeId(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetReservedStripeId(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.reservedStripeId;
+    return metapage.reservedStripeId;
 }
 
 
@@ -323,11 +317,10 @@ ColumnarStorageGetReservedStripeId(Relation rel, bool force)
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetReservedRowNumber(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetReservedRowNumber(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.reservedRowNumber;
+    return metapage.reservedRowNumber;
 }
 
 
@@ -338,11 +331,10 @@ ColumnarStorageGetReservedRowNumber(Relation rel, bool force)
  * 'force' is true.
  */
 uint64
-ColumnarStorageGetReservedOffset(Relation rel, bool force)
-{
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+ColumnarStorageGetReservedOffset(Relation rel, bool force) {
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
-	return metapage.reservedOffset;
+    return metapage.reservedOffset;
 }
 
 
@@ -351,18 +343,16 @@ ColumnarStorageGetReservedOffset(Relation rel, bool force)
  * the current version.
  */
 bool
-ColumnarStorageIsCurrent(Relation rel)
-{
-	RelationOpenSmgr(rel);
-	BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+ColumnarStorageIsCurrent(Relation rel) {
+    RelationOpenSmgr(rel);
+    BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
-	if (nblocks < 2)
-	{
-		return false;
-	}
+    if (nblocks < 2) {
+        return false;
+    }
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, true);
-	return ColumnarMetapageIsCurrent(&metapage);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, true);
+    return ColumnarMetapageIsCurrent(&metapage);
 }
 
 
@@ -371,20 +361,19 @@ ColumnarStorageIsCurrent(Relation rel)
  * it for next row number reservation.
  */
 uint64
-ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows)
-{
-	LockRelationForExtension(rel, ExclusiveLock);
+ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows) {
+    LockRelationForExtension(rel, ExclusiveLock);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
 
-	uint64 firstRowNumber = metapage.reservedRowNumber;
-	metapage.reservedRowNumber += nrows;
+    uint64 firstRowNumber = metapage.reservedRowNumber;
+    metapage.reservedRowNumber += nrows;
 
-	ColumnarOverwriteMetapage(rel, metapage);
+    ColumnarOverwriteMetapage(rel, metapage);
 
-	UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return firstRowNumber;
+    return firstRowNumber;
 }
 
 
@@ -395,20 +384,19 @@ ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows)
  * See ColumnarStorageReserveRowNumber function.
  */
 uint64
-ColumnarStorageReserveStripeId(Relation rel)
-{
-	LockRelationForExtension(rel, ExclusiveLock);
+ColumnarStorageReserveStripeId(Relation rel) {
+    LockRelationForExtension(rel, ExclusiveLock);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
 
-	uint64 stripeId = metapage.reservedStripeId;
-	metapage.reservedStripeId++;
+    uint64 stripeId = metapage.reservedStripeId;
+    metapage.reservedStripeId++;
 
-	ColumnarOverwriteMetapage(rel, metapage);
+    ColumnarOverwriteMetapage(rel, metapage);
 
-	UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return stripeId;
+    return stripeId;
 }
 
 
@@ -416,42 +404,39 @@ ColumnarStorageReserveStripeId(Relation rel)
  * ColumnarStorageReserveData - reserve logical data offsets for writing.
  */
 uint64
-ColumnarStorageReserveData(Relation rel, uint64 amount)
-{
-	if (amount == 0)
-	{
-		return ColumnarInvalidLogicalOffset;
-	}
+ColumnarStorageReserveData(Relation rel, uint64 amount) {
+    if (amount == 0) {
+        return ColumnarInvalidLogicalOffset;
+    }
 
-	LockRelationForExtension(rel, ExclusiveLock);
+    LockRelationForExtension(rel, ExclusiveLock);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
 
-	uint64 alignedReservation = AlignReservation(metapage.reservedOffset);
-	uint64 nextReservation = alignedReservation + amount;
-	metapage.reservedOffset = nextReservation;
+    uint64 alignedReservation = AlignReservation(metapage.reservedOffset);
+    uint64 nextReservation = alignedReservation + amount;
+    metapage.reservedOffset = nextReservation;
 
-	/* write new reservation */
-	ColumnarOverwriteMetapage(rel, metapage);
+    /* write new reservation */
+    ColumnarOverwriteMetapage(rel, metapage);
 
-	/* last used PhysicalAddr of new reservation */
-	PhysicalAddr final = LogicalToPhysical(nextReservation - 1);
+    /* last used PhysicalAddr of new reservation */
+    PhysicalAddr final = LogicalToPhysical(nextReservation - 1);
 
-	/* extend with new pages */
-	RelationOpenSmgr(rel);
-	BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+    /* extend with new pages */
+    RelationOpenSmgr(rel);
+    BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
-	while (nblocks <= final.blockno)
-	{
-		Buffer newBuffer = ReadBuffer(rel, P_NEW);
-		Assert(BufferGetBlockNumber(newBuffer) == nblocks);
-		ReleaseBuffer(newBuffer);
-		nblocks++;
-	}
+    while (nblocks <= final.blockno) {
+        Buffer newBuffer = ReadBuffer(rel, P_NEW);
+        Assert(BufferGetBlockNumber(newBuffer) == nblocks);
+        ReleaseBuffer(newBuffer);
+        nblocks++;
+    }
 
-	UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return alignedReservation;
+    return alignedReservation;
 }
 
 
@@ -460,34 +445,30 @@ ColumnarStorageReserveData(Relation rel, uint64 amount)
  * read the buffer from multiple blocks if necessary.
  */
 void
-ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amount)
-{
-	/* if there's no work to do, succeed even with invalid offset */
-	if (amount == 0)
-	{
-		return;
-	}
+ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amount) {
+    /* if there's no work to do, succeed even with invalid offset */
+    if (amount == 0) {
+        return;
+    }
 
-	if (!ColumnarLogicalOffsetIsValid(logicalOffset))
-	{
-		elog(ERROR,
-			 "attempted columnar read on relation %d from invalid logical offset: "
-			 UINT64_FORMAT,
-			 rel->rd_id, logicalOffset);
-	}
+    if (!ColumnarLogicalOffsetIsValid(logicalOffset)) {
+        elog(ERROR,
+             "attempted columnar read on relation %d from invalid logical offset: "
+                     UINT64_FORMAT,
+             rel->rd_id, logicalOffset);
+    }
 
-	uint64 read = 0;
+    uint64 read = 0;
 
-	while (read < amount)
-	{
-		PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
+    while (read < amount) {
+        PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
 
-		uint32 to_read = Min(amount - read, BLCKSZ - addr.offset);
-		ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
-					  false);
+        uint32 to_read = Min(amount - read, BLCKSZ - addr.offset);
+        ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
+                      false);
 
-		read += to_read;
-	}
+        read += to_read;
+    }
 }
 
 
@@ -496,34 +477,30 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
  * write the buffer across multiple blocks if necessary.
  */
 void
-ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amount)
-{
-	/* if there's no work to do, succeed even with invalid offset */
-	if (amount == 0)
-	{
-		return;
-	}
+ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amount) {
+    /* if there's no work to do, succeed even with invalid offset */
+    if (amount == 0) {
+        return;
+    }
 
-	if (!ColumnarLogicalOffsetIsValid(logicalOffset))
-	{
-		elog(ERROR,
-			 "attempted columnar write on relation %d to invalid logical offset: "
-			 UINT64_FORMAT,
-			 rel->rd_id, logicalOffset);
-	}
+    if (!ColumnarLogicalOffsetIsValid(logicalOffset)) {
+        elog(ERROR,
+             "attempted columnar write on relation %d to invalid logical offset: "
+                     UINT64_FORMAT,
+             rel->rd_id, logicalOffset);
+    }
 
-	uint64 written = 0;
+    uint64 written = 0;
 
-	while (written < amount)
-	{
-		PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
+    while (written < amount) {
+        PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
 
-		uint64 to_write = Min(amount - written, BLCKSZ - addr.offset);
-		WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
-					 false);
+        uint64 to_write = Min(amount - written, BLCKSZ - addr.offset);
+        WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
+                     false);
 
-		written += to_write;
-	}
+        written += to_write;
+    }
 }
 
 
@@ -537,64 +514,58 @@ ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amou
  * Returns true if pages were truncated; false otherwise.
  */
 bool
-ColumnarStorageTruncate(Relation rel, uint64 newDataReservation)
-{
-	if (!ColumnarLogicalOffsetIsValid(newDataReservation))
-	{
-		elog(ERROR,
-			 "attempted to truncate relation %d to invalid logical offset: " UINT64_FORMAT,
-			 rel->rd_id, newDataReservation);
-	}
+ColumnarStorageTruncate(Relation rel, uint64 newDataReservation) {
+    if (!ColumnarLogicalOffsetIsValid(newDataReservation)) {
+        elog(ERROR,
+             "attempted to truncate relation %d to invalid logical offset: " UINT64_FORMAT,
+             rel->rd_id, newDataReservation);
+    }
 
-	RelationOpenSmgr(rel);
-	BlockNumber old_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
-	if (old_rel_pages == 0)
-	{
-		/* nothing to do */
-		return false;
-	}
+    RelationOpenSmgr(rel);
+    BlockNumber old_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+    if (old_rel_pages == 0) {
+        /* nothing to do */
+        return false;
+    }
 
-	LockRelationForExtension(rel, ExclusiveLock);
+    LockRelationForExtension(rel, ExclusiveLock);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
 
-	if (metapage.reservedOffset < newDataReservation)
-	{
-		elog(ERROR,
-			 "attempted to truncate relation %d to offset " UINT64_FORMAT \
-			 " which is higher than existing offset " UINT64_FORMAT,
-			 rel->rd_id, newDataReservation, metapage.reservedOffset);
-	}
+    if (metapage.reservedOffset < newDataReservation) {
+        elog(ERROR,
+             "attempted to truncate relation %d to offset " UINT64_FORMAT \
+             " which is higher than existing offset " UINT64_FORMAT,
+             rel->rd_id, newDataReservation, metapage.reservedOffset);
+    }
 
-	if (metapage.reservedOffset == newDataReservation)
-	{
-		/* nothing to do */
-		UnlockRelationForExtension(rel, ExclusiveLock);
-		return false;
-	}
+    if (metapage.reservedOffset == newDataReservation) {
+        /* nothing to do */
+        UnlockRelationForExtension(rel, ExclusiveLock);
+        return false;
+    }
 
-	metapage.reservedOffset = newDataReservation;
+    metapage.reservedOffset = newDataReservation;
 
-	/* write new reservation */
-	ColumnarOverwriteMetapage(rel, metapage);
+    /* write new reservation */
+    ColumnarOverwriteMetapage(rel, metapage);
 
-	UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(rel, ExclusiveLock);
 
-	PhysicalAddr final = LogicalToPhysical(newDataReservation - 1);
-	BlockNumber new_rel_pages = final.blockno + 1;
-	Assert(new_rel_pages <= old_rel_pages);
+    PhysicalAddr final = LogicalToPhysical(newDataReservation - 1);
+    BlockNumber new_rel_pages = final.blockno + 1;
+    Assert(new_rel_pages <= old_rel_pages);
 
-	/*
-	 * Truncate the storage. Note that RelationTruncate() takes care of
-	 * Write Ahead Logging.
-	 */
-	if (new_rel_pages < old_rel_pages)
-	{
-		RelationTruncate(rel, new_rel_pages);
-		return true;
-	}
+    /*
+     * Truncate the storage. Note that RelationTruncate() takes care of
+     * Write Ahead Logging.
+     */
+    if (new_rel_pages < old_rel_pages) {
+        RelationTruncate(rel, new_rel_pages);
+        return true;
+    }
 
-	return false;
+    return false;
 }
 
 
@@ -603,12 +574,11 @@ ColumnarStorageTruncate(Relation rel, uint64 newDataReservation)
  * for given relation.
  */
 static void
-ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage)
-{
-	/* clear metapage because we are overwriting */
-	bool clear = true;
-	WriteToBlock(relation, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				 (char *) &columnarMetapage, sizeof(ColumnarMetapage), clear);
+ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage) {
+    /* clear metapage because we are overwriting */
+    bool clear = true;
+    WriteToBlock(relation, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
+                 (char *) &columnarMetapage, sizeof(ColumnarMetapage), clear);
 }
 
 
@@ -624,40 +594,37 @@ ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage)
  * read for the purposes of upgrading or error checking.
  */
 static ColumnarMetapage
-ColumnarMetapageRead(Relation rel, bool force)
-{
-	RelationOpenSmgr(rel);
-	BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
-	if (nblocks == 0)
-	{
-		/*
-		 * We only expect this to happen when upgrading citus.so. This is because,
-		 * in current version of columnar, we immediately create the metapage
-		 * for columnar tables, i.e right after creating the table.
-		 * However in older versions, we were creating metapages lazily, i.e
-		 * when ingesting data to columnar table.
-		 */
-		ereport(ERROR, (errmsg("columnar metapage for relation \"%s\" does not exist",
-							   RelationGetRelationName(rel)),
-						errhint(OLD_METAPAGE_VERSION_HINT)));
-	}
+ColumnarMetapageRead(Relation rel, bool force) {
+    RelationOpenSmgr(rel);
+    BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+    if (nblocks == 0) {
+        /*
+         * We only expect this to happen when upgrading citus.so. This is because,
+         * in current version of columnar, we immediately create the metapage
+         * for columnar tables, i.e right after creating the table.
+         * However in older versions, we were creating metapages lazily, i.e
+         * when ingesting data to columnar table.
+         */
+        ereport(ERROR, (errmsg("columnar metapage for relation \"%s\" does not exist",
+                               RelationGetRelationName(rel)),
+                errhint(OLD_METAPAGE_VERSION_HINT)));
+    }
 
-	/*
-	 * Regardless of "force" parameter, always force read metapage block.
-	 * We will check metapage version in ColumnarMetapageCheckVersion
-	 * depending on "force".
-	 */
-	bool forceReadBlock = true;
-	ColumnarMetapage metapage;
-	ReadFromBlock(rel, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				  (char *) &metapage, sizeof(ColumnarMetapage), forceReadBlock);
+    /*
+     * Regardless of "force" parameter, always force read metapage block.
+     * We will check metapage version in ColumnarMetapageCheckVersion
+     * depending on "force".
+     */
+    bool forceReadBlock = true;
+    ColumnarMetapage metapage;
+    ReadFromBlock(rel, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
+                  (char *) &metapage, sizeof(ColumnarMetapage), forceReadBlock);
 
-	if (!force)
-	{
-		ColumnarMetapageCheckVersion(rel, &metapage);
-	}
+    if (!force) {
+        ColumnarMetapageCheckVersion(rel, &metapage);
+    }
 
-	return metapage;
+    return metapage;
 }
 
 
@@ -668,22 +635,20 @@ ColumnarMetapageRead(Relation rel, bool force)
  */
 static void
 ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
-			  uint32 len, bool force)
-{
-	Buffer buffer = ReadBuffer(rel, blockno);
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	Page page = BufferGetPage(buffer);
-	PageHeader phdr = (PageHeader) page;
+              uint32 len, bool force) {
+    Buffer buffer = ReadBuffer(rel, blockno);
+    LockBuffer(buffer, BUFFER_LOCK_SHARE);
+    Page page = BufferGetPage(buffer);
+    PageHeader phdr = (PageHeader) page;
 
-	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
-	{
-		elog(ERROR,
-			 "attempt to read columnar data of length %d from offset %d of block %d of relation %d",
-			 len, offset, blockno, rel->rd_id);
-	}
+    if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len))) {
+        elog(ERROR,
+             "attempt to read columnar data of length %d from offset %d of block %d of relation %d",
+             len, offset, blockno, rel->rd_id);
+    }
 
-	memcpy_s(buf, len, page + offset, len);
-	UnlockReleaseBuffer(buffer);
+    memcpy_s(buf, len, page + offset, len);
+    UnlockReleaseBuffer(buffer);
 }
 
 
@@ -696,68 +661,63 @@ ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
  */
 static void
 WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
-			 uint32 len, bool clear)
-{
-	Buffer buffer = ReadBuffer(rel, blockno);
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+             uint32 len, bool clear) {
+    Buffer buffer = ReadBuffer(rel, blockno);
+    LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
-	Page page = BufferGetPage(buffer);
-	PageHeader phdr = (PageHeader) page;
-	if (PageIsNew(page) || clear)
-	{
-		PageInit(page, BLCKSZ, 0);
-	}
+    Page page = BufferGetPage(buffer);
+    PageHeader phdr = (PageHeader) page;
+    if (PageIsNew(page) || clear) {
+        PageInit(page, BLCKSZ, 0);
+    }
 
-	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
-	{
-		elog(ERROR,
-			 "attempt to write columnar data of length %d to offset %d of block %d of relation %d",
-			 len, offset, blockno, rel->rd_id);
-	}
+    if (phdr->pd_lower < offset || phdr->pd_upper - offset < len) {
+        elog(ERROR,
+             "attempt to write columnar data of length %d to offset %d of block %d of relation %d",
+             len, offset, blockno, rel->rd_id);
+    }
 
-	/*
-	 * After a transaction has been rolled-back, we might be
-	 * over-writing the rolledback write, so phdr->pd_lower can be
-	 * different from addr.offset.
-	 *
-	 * We reset pd_lower to reset the rolledback write.
-	 *
-	 * Given that we always align page reservation to the next page as of
-	 * 10.2, having such a disk page is only possible if write operaion
-	 * failed in an older version of columnar, but now user attempts writing
-	 * to that table in version >= 10.2.
-	 */
-	if (phdr->pd_lower > offset)
-	{
-		ereport(DEBUG4, (errmsg("overwriting page %u", blockno),
-						 errdetail("This can happen after a roll-back.")));
-		phdr->pd_lower = offset;
-	}
+    /*
+     * After a transaction has been rolled-back, we might be
+     * over-writing the rolledback write, so phdr->pd_lower can be
+     * different from addr.offset.
+     *
+     * We reset pd_lower to reset the rolledback write.
+     *
+     * Given that we always align page reservation to the next page as of
+     * 10.2, having such a disk page is only possible if write operaion
+     * failed in an older version of columnar, but now user attempts writing
+     * to that table in version >= 10.2.
+     */
+    if (phdr->pd_lower > offset) {
+        ereport(DEBUG4, (errmsg("overwriting page %u", blockno),
+                errdetail("This can happen after a roll-back.")));
+        phdr->pd_lower = offset;
+    }
 
-	START_CRIT_SECTION();
+    START_CRIT_SECTION();
 
-	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-	phdr->pd_lower += len;
+    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
+    phdr->pd_lower += len;
 
-	MarkBufferDirty(buffer);
+    MarkBufferDirty(buffer);
 
-	if (RelationNeedsWAL(rel))
-	{
-		XLogBeginInsert();
+    if (RelationNeedsWAL(rel)) {
+        XLogBeginInsert();
 
-		/*
-		 * Since columnar will mostly write whole pages we force the transmission of the
-		 * whole image in the buffer
-		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_FORCE_IMAGE);
+        /*
+         * Since columnar will mostly write whole pages we force the transmission of the
+         * whole image in the buffer
+         */
+        XLogRegisterBuffer(0, buffer, REGBUF_FORCE_IMAGE);
 
-		XLogRecPtr recptr = XLogInsert(RM_GENERIC_ID, 0);
-		PageSetLSN(page, recptr);
-	}
+        XLogRecPtr recptr = XLogInsert(RM_GENERIC_ID, 0);
+        PageSetLSN(page, recptr);
+    }
 
-	END_CRIT_SECTION();
+    END_CRIT_SECTION();
 
-	UnlockReleaseBuffer(buffer);
+    UnlockReleaseBuffer(buffer);
 }
 
 
@@ -768,22 +728,20 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
  * XXX: Reconsider whether we want/need to do this at all.
  */
 static uint64
-AlignReservation(uint64 prevReservation)
-{
-	PhysicalAddr prevAddr = LogicalToPhysical(prevReservation);
-	uint64 alignedReservation = prevReservation;
+AlignReservation(uint64 prevReservation) {
+    PhysicalAddr prevAddr = LogicalToPhysical(prevReservation);
+    uint64 alignedReservation = prevReservation;
 
-	if (prevAddr.offset != SizeOfPageHeaderData)
-	{
-		/* not aligned; align on beginning of next page */
-		PhysicalAddr initial = { 0 };
-		initial.blockno = prevAddr.blockno + 1;
-		initial.offset = SizeOfPageHeaderData;
-		alignedReservation = PhysicalToLogical(initial);
-	}
+    if (prevAddr.offset != SizeOfPageHeaderData) {
+        /* not aligned; align on beginning of next page */
+        PhysicalAddr initial = {0};
+        initial.blockno = prevAddr.blockno + 1;
+        initial.offset = SizeOfPageHeaderData;
+        alignedReservation = PhysicalToLogical(initial);
+    }
 
-	Assert(alignedReservation >= prevReservation);
-	return alignedReservation;
+    Assert(alignedReservation >= prevReservation);
+    return alignedReservation;
 }
 
 
@@ -791,10 +749,9 @@ AlignReservation(uint64 prevReservation)
  * ColumnarMetapageIsCurrent - is the metapage at the latest version?
  */
 static bool
-ColumnarMetapageIsCurrent(ColumnarMetapage *metapage)
-{
-	return (metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
-			metapage->versionMinor == COLUMNAR_VERSION_MINOR);
+ColumnarMetapageIsCurrent(ColumnarMetapage *metapage) {
+    return (metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
+            metapage->versionMinor == COLUMNAR_VERSION_MINOR);
 }
 
 
@@ -802,11 +759,10 @@ ColumnarMetapageIsCurrent(ColumnarMetapage *metapage)
  * ColumnarMetapageIsOlder - is the metapage older than the current version?
  */
 static bool
-ColumnarMetapageIsOlder(ColumnarMetapage *metapage)
-{
-	return (metapage->versionMajor < COLUMNAR_VERSION_MAJOR ||
-			(metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
-			 (int) metapage->versionMinor < (int) COLUMNAR_VERSION_MINOR));
+ColumnarMetapageIsOlder(ColumnarMetapage *metapage) {
+    return (metapage->versionMajor < COLUMNAR_VERSION_MAJOR ||
+            (metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
+             (int) metapage->versionMinor < (int) COLUMNAR_VERSION_MINOR));
 }
 
 
@@ -814,11 +770,10 @@ ColumnarMetapageIsOlder(ColumnarMetapage *metapage)
  * ColumnarMetapageIsNewer - is the metapage newer than the current version?
  */
 static bool
-ColumnarMetapageIsNewer(ColumnarMetapage *metapage)
-{
-	return (metapage->versionMajor > COLUMNAR_VERSION_MAJOR ||
-			(metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
-			 metapage->versionMinor > COLUMNAR_VERSION_MINOR));
+ColumnarMetapageIsNewer(ColumnarMetapage *metapage) {
+    return (metapage->versionMajor > COLUMNAR_VERSION_MAJOR ||
+            (metapage->versionMajor == COLUMNAR_VERSION_MAJOR &&
+             metapage->versionMinor > COLUMNAR_VERSION_MINOR));
 }
 
 
@@ -827,21 +782,19 @@ ColumnarMetapageIsNewer(ColumnarMetapage *metapage)
  * version of metapage.
  */
 static void
-ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage)
-{
-	if (!ColumnarMetapageIsCurrent(metapage))
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg(
-							"attempted to access relation \"%s\", which uses an older columnar format",
-							RelationGetRelationName(rel)),
-						errdetail(
-							"Columnar format version %d.%d is required, \"%s\" has version %d.%d.",
-							COLUMNAR_VERSION_MAJOR, COLUMNAR_VERSION_MINOR,
-							RelationGetRelationName(rel),
-							metapage->versionMajor, metapage->versionMinor),
-						errhint(OLD_METAPAGE_VERSION_HINT)));
-	}
+ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage) {
+    if (!ColumnarMetapageIsCurrent(metapage)) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg(
+                        "attempted to access relation \"%s\", which uses an older columnar format",
+                        RelationGetRelationName(rel)),
+                errdetail(
+                        "Columnar format version %d.%d is required, \"%s\" has version %d.%d.",
+                        COLUMNAR_VERSION_MAJOR, COLUMNAR_VERSION_MINOR,
+                        RelationGetRelationName(rel),
+                        metapage->versionMajor, metapage->versionMinor),
+                errhint(OLD_METAPAGE_VERSION_HINT)));
+    }
 }
 
 
@@ -852,27 +805,26 @@ ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage)
  * so we define it here.
  */
 Datum
-test_columnar_storage_write_new_page(PG_FUNCTION_ARGS)
-{
-	Oid relationId = PG_GETARG_OID(0);
+test_columnar_storage_write_new_page(PG_FUNCTION_ARGS) {
+    Oid relationId = PG_GETARG_OID(0);
 
-	Relation relation = relation_open(relationId, AccessShareLock);
+    Relation relation = relation_open(relationId, AccessShareLock);
 
-	/*
-	 * Allocate a new page, write some data to there, and set reserved offset
-	 * to the start of that page. That way, for a subsequent write operation,
-	 * storage layer would try to overwrite the page that we allocated here.
-	 */
-	uint64 newPageOffset = ColumnarStorageGetReservedOffset(relation, false);
+    /*
+     * Allocate a new page, write some data to there, and set reserved offset
+     * to the start of that page. That way, for a subsequent write operation,
+     * storage layer would try to overwrite the page that we allocated here.
+     */
+    uint64 newPageOffset = ColumnarStorageGetReservedOffset(relation, false);
 
-	ColumnarStorageReserveData(relation, 100);
-	ColumnarStorageWrite(relation, newPageOffset, "foo_bar", 8);
+    ColumnarStorageReserveData(relation, 100);
+    ColumnarStorageWrite(relation, newPageOffset, "foo_bar", 8);
 
-	ColumnarMetapage metapage = ColumnarMetapageRead(relation, false);
-	metapage.reservedOffset = newPageOffset;
-	ColumnarOverwriteMetapage(relation, metapage);
+    ColumnarMetapage metapage = ColumnarMetapageRead(relation, false);
+    metapage.reservedOffset = newPageOffset;
+    ColumnarOverwriteMetapage(relation, metapage);
 
-	relation_close(relation, AccessShareLock);
+    relation_close(relation, AccessShareLock);
 
-	PG_RETURN_VOID();
+    PG_RETURN_VOID();
 }

@@ -2109,7 +2109,6 @@ IsColumnarTableAmTable(Oid relationId) {
     return result;
 }
 
-
 static const TableAmRoutine columnar_am_methods = {
         .type = T_TableAmRoutine,
 
