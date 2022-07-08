@@ -143,9 +143,9 @@ static void TruncateColumnar(Relation rel, int elevel);
 
 static HeapTuple ColumnarSlotCopyHeapTuple(TupleTableSlot *slot);
 
-static void ColumnarCheckLogicalReplication(Relation rel);
+static void ColumnarCheckLogicalReplica(Relation relation);
 
-static Datum *detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull);
+static Datum *detoastValues(TupleDesc tupleDesc, Datum *originalRowValues, const bool *isnull);
 
 static ItemPointerData row_number_to_tid(uint64 rowNumber);
 
@@ -349,17 +349,12 @@ columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlo
 }
 
 
-/*
- * row_number_to_tid maps given rowNumber to ItemPointerData.
- */
-static ItemPointerData
-row_number_to_tid(uint64 rowNumber) {
+static ItemPointerData row_number_to_tid(uint64 rowNumber) {
     ErrorIfInvalidRowNumber(rowNumber);
 
     ItemPointerData tid = {0};
     ItemPointerSetBlockNumber(&tid, rowNumber / VALID_ITEMPOINTER_OFFSETS);
-    ItemPointerSetOffsetNumber(&tid, rowNumber % VALID_ITEMPOINTER_OFFSETS +
-                                     FirstOffsetNumber);
+    ItemPointerSetOffsetNumber(&tid, rowNumber % VALID_ITEMPOINTER_OFFSETS + FirstOffsetNumber);
     return tid;
 }
 
@@ -689,48 +684,55 @@ columnar_compute_xid_horizon_for_tuples(Relation rel,
 
 #endif
 
+static void columnar_tuple_insert(Relation relation,
+                                  TupleTableSlot *tupleTableSlot,
+                                  CommandId commandId,
+                                  int options,
+                                  BulkInsertState bulkInsertState) {
 
-static void
-columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
-                      int options, BulkInsertState bistate) {
     CheckCitusVersion(ERROR);
 
-    /*
-     * columnar_init_write_state allocates the write state in a longer
-     * lasting context, so no need to worry about it.
-     */
-    ColumnarWriteState *writeState = columnar_init_write_state(relation,
-                                                               RelationGetDescr(relation),
-                                                               GetCurrentSubTransactionId());
-    MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
-            writeState));
+    // allocates write state in a longer lasting context, so no need to worry about it.
+    ColumnarWriteState *columnarWriteState = columnar_init_write_state(relation,
+                                                                       RelationGetDescr(relation),
+                                                                       GetCurrentSubTransactionId());
 
-    ColumnarCheckLogicalReplication(relation);
+    MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(columnarWriteState));
 
-    slot_getallattrs(slot);
+    // 这里说到的publication 是pub/sub体系主从复制
+    ColumnarCheckLogicalReplica(relation);
 
-    Datum *values = detoast_values(slot->tts_tupleDescriptor,
-                                   slot->tts_values, slot->tts_isnull);
+    slot_getallattrs(tupleTableSlot);
 
-    uint64 writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
-    slot->tts_tid = row_number_to_tid(writtenRowNumber);
+    Datum *deToastRowData = detoastValues(tupleTableSlot->tts_tupleDescriptor,
+                                          tupleTableSlot->tts_values,
+                                          tupleTableSlot->tts_isnull);
+
+    uint64 writtenRowNumber = ColumnarWriteRow(columnarWriteState,
+                                               deToastRowData,
+                                               tupleTableSlot->tts_isnull);
+
+    tupleTableSlot->tts_tid = row_number_to_tid(writtenRowNumber);
 
     MemoryContextSwitchTo(oldContext);
-    MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+    MemoryContextReset(ColumnarWritePerTupleContext(columnarWriteState));
 }
 
 
-static void
-columnar_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
-                                  CommandId cid, int options,
-                                  BulkInsertState bistate, uint32 specToken) {
+static void columnar_tuple_insert_speculative(Relation relation,
+                                              TupleTableSlot *slot,
+                                              CommandId cid,
+                                              int options,
+                                              BulkInsertState bistate,
+                                              uint32 specToken) {
     elog(ERROR, "columnar_tuple_insert_speculative not implemented");
 }
 
 
-static void
-columnar_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
-                                    uint32 specToken, bool succeeded) {
+static void columnar_tuple_complete_speculative(Relation relation,
+                                                TupleTableSlot *slot,
+                                                uint32 specToken,
+                                                bool succeeded) {
     elog(ERROR, "columnar_tuple_complete_speculative not implemented");
 }
 
@@ -744,7 +746,7 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
                                                                RelationGetDescr(relation),
                                                                GetCurrentSubTransactionId());
 
-    ColumnarCheckLogicalReplication(relation);
+    ColumnarCheckLogicalReplica(relation);
 
     MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
             writeState));
@@ -754,8 +756,8 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
         slot_getallattrs(tupleSlot);
 
-        Datum *values = detoast_values(tupleSlot->tts_tupleDescriptor,
-                                       tupleSlot->tts_values, tupleSlot->tts_isnull);
+        Datum *values = detoastValues(tupleSlot->tts_tupleDescriptor,
+                                      tupleSlot->tts_values, tupleSlot->tts_isnull);
 
         uint64 writtenRowNumber = ColumnarWriteRow(writeState, values,
                                                    tupleSlot->tts_isnull);
@@ -784,7 +786,6 @@ columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
     elog(ERROR, "columnar_tuple_update not implemented");
 }
 
-
 static TM_Result
 columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
                     TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
@@ -793,21 +794,18 @@ columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
     elog(ERROR, "columnar_tuple_lock not implemented");
 }
 
-
-static void
-columnar_finish_bulk_insert(Relation relation, int options) {
+static void columnar_finish_bulk_insert(Relation relation, int options) {
     /*
      * Nothing to do here. We keep write states live until transaction end.
      */
 }
 
 
-static void
-columnar_relation_set_new_filenode(Relation rel,
-                                   const RelFileNode *newrnode,
-                                   char persistence,
-                                   TransactionId *freezeXid,
-                                   MultiXactId *minmulti) {
+static void columnar_relation_set_new_filenode(Relation rel,
+                                               const RelFileNode *newrnode,
+                                               char persistence,
+                                               TransactionId *freezeXid,
+                                               MultiXactId *minmulti) {
     CheckCitusVersion(ERROR);
 
     if (persistence == RELPERSISTENCE_UNLOGGED) {
@@ -1137,7 +1135,7 @@ LogRelationStats(Relation rel, int elevel) {
             bool attrDropped = tupdesc->attrs[column].attisdropped;
             for (uint32 chunk = 0; chunk < skiplist->chunkCount; chunk++) {
                 ColumnChunkSkipNode *skipnode =
-                        &skiplist->chunkSkipNodeArray[column][chunk];
+                        &skiplist->columnChunkSkipNodeArray[column][chunk];
 
                 /* ignore zero length chunks for dropped attributes */
                 if (skipnode->valueLength > 0) {
@@ -1817,29 +1815,24 @@ columnar_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate) 
 }
 
 
-static bool
-columnar_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
-                                TupleTableSlot *slot) {
+static bool columnar_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
+                                            TupleTableSlot *slot) {
     elog(ERROR, "columnar_scan_sample_next_tuple not implemented");
 }
 
 
-static void
-ColumnarXactCallback(XactEvent event, void *arg) {
+static void ColumnarXactCallback(XactEvent event, void *arg) {
     switch (event) {
         case XACT_EVENT_COMMIT:
         case XACT_EVENT_PARALLEL_COMMIT:
         case XACT_EVENT_PREPARE: {
-            /* nothing to do */
             break;
         }
-
         case XACT_EVENT_ABORT:
         case XACT_EVENT_PARALLEL_ABORT: {
             DiscardWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
             break;
         }
-
         case XACT_EVENT_PRE_COMMIT:
         case XACT_EVENT_PARALLEL_PRE_COMMIT:
         case XACT_EVENT_PRE_PREPARE: {
@@ -1850,31 +1843,31 @@ ColumnarXactCallback(XactEvent event, void *arg) {
 }
 
 
-static void
-ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
-                        SubTransactionId parentSubid, void *arg) {
+static void ColumnarSubXactCallback(SubXactEvent event,
+                                    SubTransactionId mySubid,
+                                    SubTransactionId parentSubid,
+                                    void *arg) {
     switch (event) {
         case SUBXACT_EVENT_START_SUB:
         case SUBXACT_EVENT_COMMIT_SUB: {
-            /* nothing to do */
             break;
         }
-
         case SUBXACT_EVENT_ABORT_SUB: {
             DiscardWriteStateForAllRels(mySubid, parentSubid);
             break;
         }
-
         case SUBXACT_EVENT_PRE_COMMIT_SUB: {
             FlushWriteStateForAllRels(mySubid, parentSubid);
             break;
+        }
+        default: {
+
         }
     }
 }
 
 
-void
-columnar_tableam_init() {
+void columnar_tableam_init() {
     RegisterXactCallback(ColumnarXactCallback, NULL);
     RegisterSubXactCallback(ColumnarSubXactCallback, NULL);
 
@@ -2139,8 +2132,8 @@ static const TableAmRoutine columnar_am_methods = {
 #endif
 
         .tuple_insert = columnar_tuple_insert,
-        .tuple_insert_speculative = columnar_tuple_insert_speculative,
-        .tuple_complete_speculative = columnar_tuple_complete_speculative,
+        .tuple_insert_speculative = columnar_tuple_insert_speculative, // 尚未实现
+        .tuple_complete_speculative = columnar_tuple_complete_speculative, // 尚未实现
         .multi_insert = columnar_multi_insert,
         .tuple_delete = columnar_tuple_delete,
         .tuple_update = columnar_tuple_update,
@@ -2177,69 +2170,72 @@ GetColumnarTableAmRoutine(void) {
 
 PG_FUNCTION_INFO_V1(columnar_handler);
 
-Datum
-columnar_handler(PG_FUNCTION_ARGS) {
+Datum columnar_handler(PG_FUNCTION_ARGS) {
     PG_RETURN_POINTER(&columnar_am_methods);
 }
 
 
 /*
- * detoast_values
+ * detoastValues
  *
  * Detoast and decompress all values. If there's no work to do, return
  * original pointer; otherwise return a newly-allocated values array. Should
  * be called in per-tuple context.
  */
-static Datum *
-detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull) {
+static Datum *detoastValues(TupleDesc tupleDesc,
+                            Datum *originalRowValues,
+                            const bool *isnull) {
     int natts = tupleDesc->natts;
 
-    /* copy on write to optimize for case where nothing is toasted */
-    Datum *values = orig_values;
+    // copy on write to optimize for case where nothing is toasted
+    Datum *rowValues = originalRowValues;
 
-    for (int i = 0; i < tupleDesc->natts; i++) {
-        if (!isnull[i] && tupleDesc->attrs[i].attlen == -1 &&
-            VARATT_IS_EXTENDED(values[i])) {
-            /* make a copy */
-            if (values == orig_values) {
-                values = palloc(sizeof(Datum) * natts);
-                memcpy_s(values, sizeof(Datum) * natts,
-                         orig_values, sizeof(Datum) * natts);
+    for (int i = 0; i < natts; i++) {
+        if (!isnull[i] &&
+            tupleDesc->attrs[i].attlen == -1 &&
+            VARATT_IS_EXTENDED(rowValues[i])) {
+
+            // 说明之前还没有到这个if里边这是第1趟  make a copy
+            if (rowValues == originalRowValues) {
+                rowValues = palloc(sizeof(Datum) * natts);
+                memcpy_s(rowValues,
+                         sizeof(Datum) * natts,
+                         originalRowValues,
+                         sizeof(Datum) * natts);
             }
 
-            /* will be freed when per-tuple context is reset */
-            struct varlena *new_value = (struct varlena *) DatumGetPointer(values[i]);
-            new_value = detoast_attr(new_value);
-            values[i] = PointerGetDatum(new_value);
+            // will be freed when per-tuple context is reset
+            struct varlena *newValue = (struct varlena *) DatumGetPointer(rowValues[i]);
+            newValue = detoast_attr(newValue);
+            rowValues[i] = PointerGetDatum(newValue);
         }
     }
 
-    return values;
+    return rowValues;
 }
 
 
 /*
- * ColumnarCheckLogicalReplication throws an error if the relation is
+ * 这里说到的publication 是pub/sub体系主从复制
+ * ColumnarCheckLogicalReplica throws an error if the relation is
  * part of any publication. This should be called before any write to
  * a columnar table, because columnar changes are not replicated with
  * logical replication (similar to a row table without a replica
  * identity).
  */
-static void
-ColumnarCheckLogicalReplication(Relation rel) {
-    if (!is_publishable_relation(rel)) {
+static void ColumnarCheckLogicalReplica(Relation relation) {
+    if (!is_publishable_relation(relation)) {
         return;
     }
 
-    if (rel->rd_pubactions == NULL) {
-        GetRelationPublicationActions(rel);
-        Assert(rel->rd_pubactions != NULL);
+    if (relation->rd_pubactions == NULL) {
+        GetRelationPublicationActions(relation);
+        Assert(relation->rd_pubactions != NULL);
     }
 
-    if (rel->rd_pubactions->pubinsert) {
+    if (relation->rd_pubactions->pubinsert) {
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg(
-                        "cannot insert into columnar table that is a part of a publication")));
+                errmsg("cannot insert into columnar table that is a part of a publication")));
     }
 }
 
@@ -2260,8 +2256,8 @@ CitusCreateAlterColumnarTableSet(char *qualifiedRelationName,
                      "compression_level => %d, "
                      "compression => %s);",
                      quote_literal_cstr(qualifiedRelationName),
-                     options->chunkRowCount,
-                     options->stripeRowCount,
+                     options->chunkRowLimit,
+                     options->stripeRowLimit,
                      options->compressionLevel,
                      quote_literal_cstr(CompressionTypeStr(options->compressionType)));
 
@@ -2376,8 +2372,7 @@ ColumnarGetTableOptionsDDL(Oid relationId) {
  */
 PG_FUNCTION_INFO_V1(alter_columnar_table_set);
 
-Datum
-alter_columnar_table_set(PG_FUNCTION_ARGS) {
+Datum alter_columnar_table_set(PG_FUNCTION_ARGS) {
     CheckCitusVersion(ERROR);
 
     Oid relationId = PG_GETARG_OID(0);
@@ -2397,9 +2392,9 @@ alter_columnar_table_set(PG_FUNCTION_ARGS) {
 
     /* chunk_group_row_limit => not null */
     if (!PG_ARGISNULL(1)) {
-        options.chunkRowCount = PG_GETARG_INT32(1);
-        if (options.chunkRowCount < CHUNK_ROW_COUNT_MINIMUM ||
-            options.chunkRowCount > CHUNK_ROW_COUNT_MAXIMUM) {
+        options.chunkRowLimit = PG_GETARG_INT32(1);
+        if (options.chunkRowLimit < CHUNK_ROW_COUNT_MINIMUM ||
+            options.chunkRowLimit > CHUNK_ROW_COUNT_MAXIMUM) {
             ereport(ERROR, (errmsg("chunk group row count limit out of range"),
                     errhint("chunk group row count limit must be between "
                     UINT64_FORMAT " and " UINT64_FORMAT,
@@ -2407,14 +2402,14 @@ alter_columnar_table_set(PG_FUNCTION_ARGS) {
                             (uint64) CHUNK_ROW_COUNT_MAXIMUM)));
         }
         ereport(DEBUG1,
-                (errmsg("updating chunk row count to %d", options.chunkRowCount)));
+                (errmsg("updating chunk row count to %d", options.chunkRowLimit)));
     }
 
     /* stripe_row_limit => not null */
     if (!PG_ARGISNULL(2)) {
-        options.stripeRowCount = PG_GETARG_INT32(2);
-        if (options.stripeRowCount < STRIPE_ROW_COUNT_MINIMUM ||
-            options.stripeRowCount > STRIPE_ROW_COUNT_MAXIMUM) {
+        options.stripeRowLimit = PG_GETARG_INT32(2);
+        if (options.stripeRowLimit < STRIPE_ROW_COUNT_MINIMUM ||
+            options.stripeRowLimit > STRIPE_ROW_COUNT_MAXIMUM) {
             ereport(ERROR, (errmsg("stripe row count limit out of range"),
                     errhint("stripe row count limit must be between "
                     UINT64_FORMAT " and " UINT64_FORMAT,
@@ -2423,7 +2418,7 @@ alter_columnar_table_set(PG_FUNCTION_ARGS) {
         }
         ereport(DEBUG1, (errmsg(
                 "updating stripe row count to " UINT64_FORMAT,
-                options.stripeRowCount)));
+                options.stripeRowLimit)));
     }
 
     /* compression => not null */
@@ -2515,17 +2510,17 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS) {
 
     /* chunk_group_row_limit => true */
     if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1)) {
-        options.chunkRowCount = columnar_chunk_group_row_limit;
+        options.chunkRowLimit = columnar_chunk_group_row_limit;
         ereport(DEBUG1,
-                (errmsg("resetting chunk row count to %d", options.chunkRowCount)));
+                (errmsg("resetting chunk row count to %d", options.chunkRowLimit)));
     }
 
     /* stripe_row_limit => true */
     if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2)) {
-        options.stripeRowCount = columnar_stripe_row_limit;
+        options.stripeRowLimit = columnar_stripe_row_limit;
         ereport(DEBUG1,
                 (errmsg("resetting stripe row count to " UINT64_FORMAT,
-                        options.stripeRowCount)));
+                        options.stripeRowLimit)));
     }
 
     /* compression => true */

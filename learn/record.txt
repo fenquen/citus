@@ -1,0 +1,29 @@
+#添加到gcc头文件
+export C_INCLUDE_PATH=$C_INCLUDE_PATH:/opt/homebrew/include
+#添加到g++头文件路径
+export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/opt/homebrew/include
+#添加到动态库
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/homebrew/lib
+#添加到静态库
+
+export LIBRARY_PATH=$LIBRARY_PATH:/opt/homebrew/lib
+
+
+
+
+InsertTupleAndEnforceConstraints 执行insert
+    heap_form_tuple 使用Datum *values生成heapTuple
+    ExecInitExtraTupleSlot 生成tupleTableSlot
+
+CREATE TABLE columnar_table (
+  id bigint,
+  addr text
+) USING columnar;
+
+
+INSERT INTO columnar_table (id, addr) values (1,'a');
+INSERT INTO columnar_table (id, addr) SELECT d, 'a' FROM generate_series(1,200000) d;
+
+SELECT alter_columnar_table_set('columnar_table',stripe_row_limit => 100000);
+
+chunk是针对某个column的 表有多个的column  那么这些的column构成chunk_group

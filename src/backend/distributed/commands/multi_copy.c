@@ -1456,7 +1456,7 @@ ConversionPathForTypes(Oid inputType, Oid destType, CopyCoercionData *result)
  * Returns the type of the provided column of the provided tuple. Throws an error if the
  * column does not exist or is dropped.
  *
- * tupleDescriptor and relationId must refer to the same table.
+ * tupleDesc and relationId must refer to the same table.
  */
 static Oid
 TypeForColumnName(Oid relationId, TupleDesc tupleDescriptor, char *columnName)
@@ -1587,7 +1587,7 @@ TypeOutputFunctions(uint32 columnCount, Oid *typeIdArray, bool binaryFormat)
 
 /*
  * ColumnOutputFunctions is a wrapper around TypeOutputFunctions, it takes a
- * tupleDescriptor and returns an array of output functions, one for each column in
+ * tupleDesc and returns an array of output functions, one for each column in
  * the tuple.
  */
 FmgrInfo *

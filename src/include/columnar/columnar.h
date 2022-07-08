@@ -11,6 +11,7 @@
 
 #ifndef COLUMNAR_H
 #define COLUMNAR_H
+
 #include "postgres.h"
 
 #include "fmgr.h"
@@ -48,17 +49,12 @@
 #define COLUMNAR_POSTSCRIPT_SIZE_MAX 256
 #define COLUMNAR_BYTES_PER_PAGE (BLCKSZ - SizeOfPageHeaderData)
 
-/*
- * ColumnarOptions holds the option values to be used when reading or writing
- * a columnar table. To resolve these values, we first check foreign table's options,
- * and if not present, we then fall back to the default values specified above.
- */
-typedef struct ColumnarOptions
-{
-	uint64 stripeRowCount;
-	uint32 chunkRowCount;
-	CompressionType compressionType;
-	int compressionLevel;
+// 对应 Form_columnar_options
+typedef struct ColumnarOptions {
+    uint64 stripeRowLimit;
+    uint32 chunkRowLimit;
+    CompressionType compressionType;
+    int compressionLevel;
 } ColumnarOptions;
 
 
@@ -66,55 +62,52 @@ typedef struct ColumnarOptions
  * ColumnarTableDDLContext holds the instance variable for the TableDDLCommandFunction
  * instance described below.
  */
-typedef struct ColumnarTableDDLContext
-{
-	char *schemaName;
-	char *relationName;
-	ColumnarOptions options;
+typedef struct ColumnarTableDDLContext {
+    char *schemaName;
+    char *relationName;
+    ColumnarOptions options;
 } ColumnarTableDDLContext;
 
+/* contains statistics for a ChunkData */
+typedef struct ColumnChunkSkipNode {
+    /* statistics about values of a column chunk */
+    bool hasMinMax;
+    Datum minimumValue;
+    Datum maximumValue;
+    uint64 rowCount;
 
-/* ColumnChunkSkipNode contains statistics for a ColumnChunkData. */
-typedef struct ColumnChunkSkipNode
-{
-	/* statistics about values of a column chunk */
-	bool hasMinMax;
-	Datum minimumValue;
-	Datum maximumValue;
-	uint64 rowCount;
+    /*
+     * Offsets and sizes of value and exists streams in the column data.
+     * These enable us to skip reading suppressed row chunks, and start reading
+     * a chunk without reading previous chunks.
+     */
+    uint64 valueChunkOffset;
+    uint64 valueLength;
+    uint64 existsChunkOffset;
+    uint64 existsLength;
 
-	/*
-	 * Offsets and sizes of value and exists streams in the column data.
-	 * These enable us to skip reading suppressed row chunks, and start reading
-	 * a chunk without reading previous chunks.
-	 */
-	uint64 valueChunkOffset;
-	uint64 valueLength;
-	uint64 existsChunkOffset;
-	uint64 existsLength;
+    /*
+     * This is used for
+     * (1) determining destination size when decompressing,
+     * (2) calculating compression rates when logging stats.
+     */
+    uint64 decompressedValueSize;
 
-	/*
-	 * This is used for (1) determining destination size when decompressing,
-	 * (2) calculating compression rates when logging stats.
-	 */
-	uint64 decompressedValueSize;
-
-	CompressionType valueCompressionType;
-	int valueCompressionLevel;
+    CompressionType valueCompressionType;
+    int valueCompressionLevel;
 } ColumnChunkSkipNode;
 
 
 /*
  * StripeSkipList can be used for skipping row chunks. It contains a column chunk
- * skip node for each chunk of each column. chunkSkipNodeArray[column][chunk]
+ * skip node for each chunk of each column. columnChunkSkipNodeArray[column][chunk]
  * is the entry for the specified column chunk.
  */
-typedef struct StripeSkipList
-{
-	ColumnChunkSkipNode **chunkSkipNodeArray;
-	uint32 *chunkGroupRowCounts;
-	uint32 columnCount;
-	uint32 chunkCount;
+typedef struct StripeSkipList {
+    ColumnChunkSkipNode **columnChunkSkipNodeArray; // columnCount * maxChunkCount 二维数组
+    uint32 *chunkGroupRowCounts; // 记录各个的chunk用了多少行
+    uint32 columnCount;
+    uint32 chunkCount; // 当前处理过的chunk数量 也意味着是实际需要的chunk数量
 } StripeSkipList;
 
 
@@ -125,20 +118,20 @@ typedef struct StripeSkipList
  * referenced by Datum's in valueArray. It is only used for by-reference Datum's.
  * There is a one-to-one correspondence between valueArray and existsArray.
  */
-typedef struct ChunkData
-{
-	uint32 rowCount;
-	uint32 columnCount;
+typedef struct ChunkData {
+    uint32 rowCount;
+    uint32 columnCount;
 
-	/*
-	 * Following are indexed by [column][row]. If a column is not projected,
-	 * then existsArray[column] and valueArray[column] are NULL.
-	 */
-	bool **existsArray;
-	Datum **valueArray;
+    /*
+     * Following are indexed by [column][row].
+     * If a column is not projected then existsArray[column] and valueArray[column] are NULL.
+     */
+    bool **existsArray; // columnCount 乘以 chunkRowLimit
+    Datum **valueArray; // columnCount 乘以 chunkRowLimit 读取的时候用到
 
-	/* valueBuffer keeps actual data for type-by-reference datums from valueArray. */
-	StringInfo *valueBufferArray;
+    // 数量和columnCount相同,用来临时保存的
+    // valueBuffer keeps actual data for type-by-reference datums from valueArray
+    StringInfo *valueBufferArray;
 } ChunkData;
 
 
@@ -149,12 +142,11 @@ typedef struct ChunkData
  * compression type if valueBuffer is compressed. Finally rowCount has
  * the number of rows in this chunk.
  */
-typedef struct ColumnChunkBuffers
-{
-	StringInfo existsBuffer;
-	StringInfo valueBuffer;
-	CompressionType valueCompressionType;
-	uint64 decompressedValueSize;
+typedef struct ColumnChunkBuffers {
+    StringInfo existsBuffer; // 使用了bit 0/1 代表 true/false
+    StringInfo valueBuffer;
+    CompressionType valueCompressionType;
+    uint64 decompressedValueSize;
 } ColumnChunkBuffers;
 
 
@@ -162,41 +154,38 @@ typedef struct ColumnChunkBuffers
  * ColumnBuffers represents data buffers for a column in a row stripe. Each
  * column is made of multiple column chunks.
  */
-typedef struct ColumnBuffers
-{
-	ColumnChunkBuffers **chunkBuffersArray;
+typedef struct ColumnBuffers {
+    ColumnChunkBuffers **columnChunkBuffersArray;
 } ColumnBuffers;
 
 
-/* StripeBuffers represents data for a row stripe. */
-typedef struct StripeBuffers
-{
-	uint32 columnCount;
-	uint32 rowCount;
-	ColumnBuffers **columnBuffersArray;
+/* StripeBuffers 对应 data for 1行 column.stripe表 */
+typedef struct StripeBuffers {
+    uint32 columnCount;
+    uint32 rowCount; // 起始的时候是0 记录处理过的行数
+    ColumnBuffers **columnBuffersArray; // 本质也是 column数量 * chunk数量
 
-	uint32 *selectedChunkGroupRowCounts;
+    uint32 *selectedChunkGroupRowCounts;
 } StripeBuffers;
 
 
 /* return value of StripeWriteState to decide stripe write state */
-typedef enum StripeWriteStateEnum
-{
-	/* stripe write is flushed to disk, so it's readable */
-	STRIPE_WRITE_FLUSHED,
+typedef enum StripeWriteStateEnum {
+    /* stripe write is flushed to disk, so it's readable */
+    STRIPE_WRITE_FLUSHED,
 
-	/*
-	 * Writer transaction did abort either before inserting into
-	 * columnar.stripe or after.
-	 */
-	STRIPE_WRITE_ABORTED,
+    /*
+     * Writer transaction did abort either before inserting into
+     * columnar.stripe or after.
+     */
+    STRIPE_WRITE_ABORTED,
 
-	/*
-	 * Writer transaction is still in-progress. Note that it is not certain
-	 * if it is being written by current backend's current transaction or
-	 * another backend.
-	 */
-	STRIPE_WRITE_IN_PROGRESS
+    /*
+     * Writer transaction is still in-progress. Note that it is not certain
+     * if it is being written by current backend's current transaction or
+     * another backend.
+     */
+    STRIPE_WRITE_IN_PROGRESS
 } StripeWriteStateEnum;
 
 
@@ -209,117 +198,157 @@ typedef struct ColumnarReadState ColumnarReadState;
 struct ColumnarWriteState;
 typedef struct ColumnarWriteState ColumnarWriteState;
 
-extern int columnar_compression;
-extern int columnar_stripe_row_limit;
-extern int columnar_chunk_group_row_limit;
-extern int columnar_compression_level;
+extern int columnar_compression; // zstd
+extern int columnar_stripe_row_limit; // 150000
+extern int columnar_chunk_group_row_limit; // 10000
+extern int columnar_compression_level; // 3
 
 extern void columnar_init_gucs(void);
 
 extern CompressionType ParseCompressionType(const char *compressionTypeString);
 
-/* Function declarations for writing to a columnar table */
-extern ColumnarWriteState * ColumnarBeginWrite(RelFileNode relfilenode,
-											   ColumnarOptions options,
-											   TupleDesc tupleDescriptor);
-extern uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
-							   bool *columnNulls);
-extern void ColumnarFlushPendingWrites(ColumnarWriteState *state);
-extern void ColumnarEndWrite(ColumnarWriteState *state);
+
+extern ColumnarWriteState *ColumnarBeginWrite(RelFileNode relFileNode,
+                                              ColumnarOptions columnarOptions,
+                                              TupleDesc tupleDesc);
+
+extern uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState, Datum *rowData,
+                               const bool *columnNulls);
+
+extern void ColumnarFlushPendingWrites(ColumnarWriteState *columnarWriteState);
+
+extern void ColumnarEndWrite(ColumnarWriteState *columnarWriteState);
+
 extern bool ContainsPendingWrites(ColumnarWriteState *state);
-extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *state);
+
+extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *columnarWriteState);
 
 /* Function declarations for reading from columnar table */
 
 /* functions applicable for both sequential and random access */
-extern ColumnarReadState * ColumnarBeginRead(Relation relation,
-											 TupleDesc tupleDescriptor,
-											 List *projectedColumnList,
-											 List *qualConditions,
-											 MemoryContext scanContext,
-											 Snapshot snaphot,
-											 bool randomAccess);
+extern ColumnarReadState *ColumnarBeginRead(Relation relation,
+                                            TupleDesc tupleDescriptor,
+                                            List *projectedColumnList,
+                                            List *qualConditions,
+                                            MemoryContext scanContext,
+                                            Snapshot snaphot,
+                                            bool randomAccess);
+
 extern void ColumnarReadFlushPendingWrites(ColumnarReadState *readState);
+
 extern void ColumnarEndRead(ColumnarReadState *state);
+
 extern void ColumnarResetRead(ColumnarReadState *readState);
 
 /* functions only applicable for sequential access */
 extern bool ColumnarReadNextRow(ColumnarReadState *state, Datum *columnValues,
-								bool *columnNulls, uint64 *rowNumber);
+                                bool *columnNulls, uint64 *rowNumber);
+
 extern int64 ColumnarReadChunkGroupsFiltered(ColumnarReadState *state);
+
 extern void ColumnarRescan(ColumnarReadState *readState, List *scanQual);
 
 /* functions only applicable for random access */
 extern void ColumnarReadRowByRowNumberOrError(ColumnarReadState *readState,
-											  uint64 rowNumber, Datum *columnValues,
-											  bool *columnNulls);
+                                              uint64 rowNumber, Datum *columnValues,
+                                              bool *columnNulls);
+
 extern bool ColumnarReadRowByRowNumber(ColumnarReadState *readState,
-									   uint64 rowNumber, Datum *columnValues,
-									   bool *columnNulls);
+                                       uint64 rowNumber, Datum *columnValues,
+                                       bool *columnNulls);
 
 /* Function declarations for common functions */
-extern FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
-										int16 procedureId);
-extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
-										uint32 chunkGroupRowCount);
+extern FmgrInfo *GetCompareFunc(Oid typeId, Oid accessMethodId,
+                                int16 procedureId);
+
+extern ChunkData *CreateEmptyChunkData(uint32 columnCount, const bool *columnMask,
+                                       uint32 chunkRowCount);
+
 extern void FreeChunkData(ChunkData *chunkData);
+
 extern uint64 ColumnarTableRowCount(Relation relation);
-extern const char * CompressionTypeStr(CompressionType type);
+
+extern const char *CompressionTypeStr(CompressionType type);
 
 /* columnar_metadata_tables.c */
 extern void InitColumnarOptions(Oid regclass);
+
 extern void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
+
 extern bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
-extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
+
+extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *columnarOptions);
+
 extern bool IsColumnarTableAmTable(Oid relationId);
 
 /* columnar_metadata_tables.c */
 extern void DeleteMetadataRows(RelFileNode relfilenode);
+
 extern uint64 ColumnarMetadataNewStorageId(void);
+
 extern uint64 GetHighestUsedAddress(RelFileNode relfilenode);
-extern EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
-												   uint64 chunkGroupRowCount,
-												   uint64 stripeRowCount);
-extern StripeMetadata * CompleteStripeReservation(Relation rel, uint64 stripeId,
-												  uint64 sizeBytes, uint64 rowCount,
-												  uint64 chunkCount);
-extern void SaveStripeSkipList(RelFileNode relfilenode, uint64 stripe,
-							   StripeSkipList *stripeSkipList,
-							   TupleDesc tupleDescriptor);
-extern void SaveChunkGroups(RelFileNode relfilenode, uint64 stripe,
-							List *chunkGroupRowCounts);
-extern StripeSkipList * ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe,
-										   TupleDesc tupleDescriptor,
-										   uint32 chunkCount,
-										   Snapshot snapshot);
-extern StripeMetadata * FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,
-												  Snapshot snapshot);
-extern StripeMetadata * FindStripeByRowNumber(Relation relation, uint64 rowNumber,
-											  Snapshot snapshot);
-extern StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
-															 uint64 rowNumber,
-															 Snapshot snapshot);
+
+extern EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable, uint64 columnCount,
+                                                  uint64 chunkGroupRowLimit,
+                                                  uint64 stripeRowCount);
+
+extern StripeMetadata *CompleteStripeReservation(Relation targetTable, uint64 stripeId,
+                                                 uint64 byteLen, uint64 rowCount,
+                                                 uint64 chunkCount);
+
+extern void SaveStripeSkipList(RelFileNode relFileNode, uint64 stripeId,
+                               StripeSkipList *stripeSkipList,
+                               TupleDesc tupleDesc);
+
+extern void SaveChunkGroups(RelFileNode relfilenode, uint64 stripeId,
+                            List *chunkGroupRowCounts);
+
+extern StripeSkipList *ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe,
+                                          TupleDesc tupleDescriptor,
+                                          uint32 chunkCount,
+                                          Snapshot snapshot);
+
+extern StripeMetadata *FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,
+                                                 Snapshot snapshot);
+
+extern StripeMetadata *FindStripeByRowNumber(Relation relation, uint64 rowNumber,
+                                             Snapshot snapshot);
+
+extern StripeMetadata *FindStripeWithMatchingFirstRowNumber(Relation relation,
+                                                            uint64 rowNumber,
+                                                            Snapshot snapshot);
+
 extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
+
 extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
-extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
-													   Snapshot snapshot);
+
+extern StripeMetadata *FindStripeWithHighestRowNumber(Relation relation,
+                                                      Snapshot snapshot);
+
 extern Datum columnar_relation_storageid(PG_FUNCTION_ARGS);
 
 
 /* write_state_management.c */
-extern ColumnarWriteState * columnar_init_write_state(Relation relation, TupleDesc
-													  tupdesc,
-													  SubTransactionId currentSubXid);
+extern ColumnarWriteState *columnar_init_write_state(Relation relation, TupleDesc
+tupleDesc,
+                                                     SubTransactionId currentSubXid);
+
 extern void FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId
-										  currentSubXid);
+currentSubXid);
+
 extern void FlushWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId
-									  parentSubXid);
+parentSubXid);
+
 extern void DiscardWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId
-										parentSubXid);
+parentSubXid);
+
 extern void MarkRelfilenodeDropped(Oid relfilenode, SubTransactionId currentSubXid);
+
 extern void NonTransactionDropWriteState(Oid relfilenode);
+
 extern bool PendingWritesInUpperTransactions(Oid relfilenode,
-											 SubTransactionId currentSubXid);
+                                             SubTransactionId currentSubXid);
+
 extern MemoryContext GetWriteContextForDebug(void);
 
 

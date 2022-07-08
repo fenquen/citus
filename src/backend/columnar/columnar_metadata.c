@@ -82,7 +82,7 @@ typedef enum RowNumberLookupMode {
 } RowNumberLookupMode;
 
 static void InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId,
-                                         uint32 columnCount, uint32 chunkGroupRowCount,
+                                         uint32 columnCount, uint32 chunkGroupRowLimit,
                                          uint64 firstRowNumber);
 
 static void GetHighestUsedAddressAndId(uint64 storageId,
@@ -122,7 +122,7 @@ static Oid ColumnarChunkGroupIndexRelationId(void);
 
 static Oid ColumnarNamespaceId(void);
 
-static uint64 LookupStorageId(RelFileNode relfilenode);
+static uint64 LookupStorageId(RelFileNode relFileNode);
 
 static uint64 GetHighestUsedRowNumber(uint64 storageId);
 
@@ -131,9 +131,9 @@ static void DeleteStorageFromColumnarMetadataTable(Oid metadataTableId,
                                                    Oid storageIdIndexId,
                                                    uint64 storageId);
 
-static ModifyState *StartModifyRelation(Relation rel);
+static ModifyState *StartModifyRelation(Relation relation);
 
-static void InsertTupleAndEnforceConstraints(ModifyState *state, Datum *values,
+static void InsertTupleAndEnforceConstraints(ModifyState *modifyState, Datum *values,
                                              bool *nulls);
 
 static void DeleteTupleAndEnforceConstraints(ModifyState *state, HeapTuple heapTuple);
@@ -181,25 +181,68 @@ typedef struct FormData_columnar_options {
 typedef FormData_columnar_options *Form_columnar_options;
 
 
-/* constants for columnar.stripe */
+/**
+ * CREATE TABLE stripe (
+    storage_id bigint NOT NULL,
+    stripe_num bigint NOT NULL,
+    file_offset bigint NOT NULL,
+    data_length bigint NOT NULL,
+    column_count int NOT NULL,
+    chunk_row_count int NOT NULL,
+    row_count bigint NOT NULL,
+    chunk_group_count int NOT NULL,
+    PRIMARY KEY (storage_id, stripe_num)
+) WITH (user_catalog_table = true);
+ */
+/* constants for columnar.stripe 总的column数量 各个column位置 */
 #define Natts_columnar_stripe 9
 #define Anum_columnar_stripe_storageid 1
-#define Anum_columnar_stripe_stripe 2
+#define Anum_columnar_stripe_stripe 2 // 更确切的说对应 strip id
 #define Anum_columnar_stripe_file_offset 3
 #define Anum_columnar_stripe_data_length 4
 #define Anum_columnar_stripe_column_count 5
-#define Anum_columnar_stripe_chunk_row_count 6
+#define Anum_columnar_stripe_chunk_row_count 6 // 确切的应该是 chunkGroupRowLimit
 #define Anum_columnar_stripe_row_count 7
 #define Anum_columnar_stripe_chunk_count 8
 #define Anum_columnar_stripe_first_row_number 9
 
+/**
+ * CREATE TABLE chunk_group (
+    storage_id bigint NOT NULL,
+    stripe_num bigint NOT NULL,
+    chunk_group_num int NOT NULL,
+    row_count bigint NOT NULL,
+    PRIMARY KEY (storage_id, stripe_num, chunk_group_num),
+    FOREIGN KEY (storage_id, stripe_num) REFERENCES stripe(storage_id, stripe_num) ON DELETE CASCADE
+);
+ */
 /* constants for columnar.chunk_group */
 #define Natts_columnar_chunkgroup 4
 #define Anum_columnar_chunkgroup_storageid 1
 #define Anum_columnar_chunkgroup_stripe 2
-#define Anum_columnar_chunkgroup_chunk 3
+#define Anum_columnar_chunkgroup_chunk 3 // chunk id
 #define Anum_columnar_chunkgroup_row_count 4
 
+/**
+ * CREATE TABLE chunk (
+    storage_id bigint NOT NULL,
+    stripe_num bigint NOT NULL,
+    attr_num int NOT NULL,
+    chunk_group_num int NOT NULL,
+    minimum_value bytea,
+    maximum_value bytea,
+    value_stream_offset bigint NOT NULL,
+    value_stream_length bigint NOT NULL,
+    exists_stream_offset bigint NOT NULL,
+    exists_stream_length bigint NOT NULL,
+    value_compression_type int NOT NULL,
+    value_compression_level int NOT NULL,
+    value_decompressed_length bigint NOT NULL,
+    value_count bigint NOT NULL,
+    PRIMARY KEY (storage_id, stripe_num, attr_num, chunk_group_num),
+    FOREIGN KEY (storage_id, stripe_num, chunk_group_num) REFERENCES chunk_group(storage_id, stripe_num, chunk_group_num) ON DELETE CASCADE
+) WITH (user_catalog_table = true);
+ */
 /* constants for columnar.chunk */
 #define Natts_columnar_chunk 14
 #define Anum_columnar_chunk_storageid 1
@@ -222,8 +265,7 @@ typedef FormData_columnar_options *Form_columnar_options;
  * InitColumnarOptions initialized the columnar table options. Meaning it writes the
  * default options to the options table if not already existing.
  */
-void
-InitColumnarOptions(Oid regclass) {
+void InitColumnarOptions(Oid regclass) {
     /*
      * When upgrading we retain options for all columnar tables by upgrading
      * "columnar.options" catalog table, so we shouldn't do anything here.
@@ -233,8 +275,8 @@ InitColumnarOptions(Oid regclass) {
     }
 
     ColumnarOptions defaultOptions = {
-            .chunkRowCount = columnar_chunk_group_row_limit,
-            .stripeRowCount = columnar_stripe_row_limit,
+            .chunkRowLimit = columnar_chunk_group_row_limit,
+            .stripeRowLimit = columnar_stripe_row_limit,
             .compressionType = columnar_compression,
             .compressionLevel = columnar_compression_level
     };
@@ -275,8 +317,8 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite) {
     bool nulls[Natts_columnar_options] = {0};
     Datum values[Natts_columnar_options] = {
             ObjectIdGetDatum(regclass),
-            Int32GetDatum(options->chunkRowCount),
-            Int32GetDatum(options->stripeRowCount),
+            Int32GetDatum(options->chunkRowLimit),
+            Int32GetDatum(options->stripeRowLimit),
             Int32GetDatum(options->compressionLevel),
             0, /* to be filled below */
     };
@@ -385,107 +427,116 @@ DeleteColumnarTableOptions(Oid regclass, bool missingOk) {
     return result;
 }
 
-
-bool
-ReadColumnarOptions(Oid regclass, ColumnarOptions *options) {
+/**
+ * CREATE TABLE options (
+    regclass regclass NOT NULL PRIMARY KEY,
+    chunk_group_row_limit int NOT NULL,
+    stripe_row_limit int NOT NULL,
+    compression_level int NOT NULL,
+    compression name NOT NULL
+) WITH (user_catalog_table = true);
+ */
+bool ReadColumnarOptions(Oid regclass, ColumnarOptions *columnarOptions) {
     ScanKeyData scanKey[1];
 
-    ScanKeyInit(&scanKey[0], Anum_columnar_options_regclass, BTEqualStrategyNumber,
+    // 到options表中得到 regclass是当前表对应的记录 该column是打头的 在上有索引名字是options_pkey
+    ScanKeyInit(&scanKey[0],
+                Anum_columnar_options_regclass, // 1
+                BTEqualStrategyNumber,
                 F_OIDEQ,
                 ObjectIdGetDatum(regclass));
 
-    Oid columnarOptionsOid = ColumnarOptionsRelationId();
-    Relation columnarOptions = try_relation_open(columnarOptionsOid, AccessShareLock);
-    if (columnarOptions == NULL) {
-        /*
-         * Extension has been dropped. This can be called while
-         * dropping extension or database via ObjectAccess().
-         */
+    // columnar.options表
+    Oid optionsTableOid = ColumnarOptionsRelationId();
+    Relation optionsTable = try_relation_open(optionsTableOid, AccessShareLock);
+    if (optionsTable == NULL) {
+        // Extension has been dropped. This can be called while dropping extension or database via ObjectAccess().
         return false;
     }
 
+    // columnar.options表上的 名为 options_pkey 的index
     Relation index = try_relation_open(ColumnarOptionsIndexRegclass(), AccessShareLock);
     if (index == NULL) {
-        table_close(columnarOptions, AccessShareLock);
+        table_close(optionsTable, AccessShareLock);
 
         /* extension has been dropped */
         return false;
     }
 
-    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarOptions, index, NULL,
-                                                            1, scanKey);
+    SysScanDesc sysScanDesc = systable_beginscan_ordered(optionsTable,
+                                                         index,
+                                                         NULL,
+                                                         1,
+                                                         scanKey);
 
-    HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
+    // 类似result.next()套路,要是在表中没有对应的记录(专门设置option)那么使用通用的默认
+    HeapTuple heapTuple = systable_getnext_ordered(sysScanDesc, ForwardScanDirection);
     if (HeapTupleIsValid(heapTuple)) {
-        Form_columnar_options tupOptions = (Form_columnar_options) GETSTRUCT(heapTuple);
+        Form_columnar_options columnarOptionsModel = (Form_columnar_options) GETSTRUCT(heapTuple);
 
-        options->chunkRowCount = tupOptions->chunk_group_row_limit;
-        options->stripeRowCount = tupOptions->stripe_row_limit;
-        options->compressionLevel = tupOptions->compressionLevel;
-        options->compressionType = ParseCompressionType(NameStr(tupOptions->compression));
+        columnarOptions->chunkRowLimit = columnarOptionsModel->chunk_group_row_limit;
+        columnarOptions->stripeRowLimit = columnarOptionsModel->stripe_row_limit;
+        columnarOptions->compressionLevel = columnarOptionsModel->compressionLevel;
+        columnarOptions->compressionType = ParseCompressionType(NameStr(columnarOptionsModel->compression));
     } else {
-        /* populate options with system defaults */
-        options->compressionType = columnar_compression;
-        options->stripeRowCount = columnar_stripe_row_limit;
-        options->chunkRowCount = columnar_chunk_group_row_limit;
-        options->compressionLevel = columnar_compression_level;
+        /* populate columnarOptions with system defaults */
+        columnarOptions->chunkRowLimit = columnar_chunk_group_row_limit;
+        columnarOptions->stripeRowLimit = columnar_stripe_row_limit;
+        columnarOptions->compressionLevel = columnar_compression_level;
+        columnarOptions->compressionType = columnar_compression;
     }
 
-    systable_endscan_ordered(scanDescriptor);
+    systable_endscan_ordered(sysScanDesc);
     index_close(index, AccessShareLock);
-    relation_close(columnarOptions, AccessShareLock);
+    relation_close(optionsTable, AccessShareLock);
 
     return true;
 }
 
 
-/*
- * SaveStripeSkipList saves chunkList for a given stripe as rows
- * of columnar.chunk.
- */
-void
-SaveStripeSkipList(RelFileNode relfilenode, uint64 stripe, StripeSkipList *chunkList,
-                   TupleDesc tupleDescriptor) {
-    uint32 columnIndex = 0;
-    uint32 chunkIndex = 0;
-    uint32 columnCount = chunkList->columnCount;
+// saves stripeSkipList for a given stripeId to columnar.chunk.
+void SaveStripeSkipList(RelFileNode relFileNode,
+                        uint64 stripeId,
+                        StripeSkipList *stripeSkipList,
+                        TupleDesc tupleDesc) {
+    uint64 storageId = LookupStorageId(relFileNode);
 
-    uint64 storageId = LookupStorageId(relfilenode);
-    Oid columnarChunkOid = ColumnarChunkRelationId();
-    Relation columnarChunk = table_open(columnarChunkOid, RowExclusiveLock);
-    ModifyState *modifyState = StartModifyRelation(columnarChunk);
+    Oid columnarChunkTableOid = ColumnarChunkRelationId();
+    Relation columnarChunkTable = table_open(columnarChunkTableOid, RowExclusiveLock);
 
-    for (columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-        for (chunkIndex = 0; chunkIndex < chunkList->chunkCount; chunkIndex++) {
-            ColumnChunkSkipNode *chunk =
-                    &chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
+    ModifyState *modifyState = StartModifyRelation(columnarChunkTable);
+
+    for (uint32 columnIndex = 0; columnIndex < stripeSkipList->columnCount; columnIndex++) {
+        for (uint32 chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
+            ColumnChunkSkipNode *columnChunkSkipNode = &stripeSkipList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
 
             Datum values[Natts_columnar_chunk] = {
                     UInt64GetDatum(storageId),
-                    Int64GetDatum(stripe),
+                    Int64GetDatum(stripeId),
                     Int32GetDatum(columnIndex + 1),
                     Int32GetDatum(chunkIndex),
                     0, /* to be filled below */
                     0, /* to be filled below */
-                    Int64GetDatum(chunk->valueChunkOffset),
-                    Int64GetDatum(chunk->valueLength),
-                    Int64GetDatum(chunk->existsChunkOffset),
-                    Int64GetDatum(chunk->existsLength),
-                    Int32GetDatum(chunk->valueCompressionType),
-                    Int32GetDatum(chunk->valueCompressionLevel),
-                    Int64GetDatum(chunk->decompressedValueSize),
-                    Int64GetDatum(chunk->rowCount)
+                    Int64GetDatum(columnChunkSkipNode->valueChunkOffset),
+                    Int64GetDatum(columnChunkSkipNode->valueLength),
+                    Int64GetDatum(columnChunkSkipNode->existsChunkOffset),
+                    Int64GetDatum(columnChunkSkipNode->existsLength),
+                    Int32GetDatum(columnChunkSkipNode->valueCompressionType),
+                    Int32GetDatum(columnChunkSkipNode->valueCompressionLevel),
+                    Int64GetDatum(columnChunkSkipNode->decompressedValueSize),
+                    Int64GetDatum(columnChunkSkipNode->rowCount)
             };
 
             bool nulls[Natts_columnar_chunk] = {false};
 
-            if (chunk->hasMinMax) {
+            if (columnChunkSkipNode->hasMinMax) {
                 values[Anum_columnar_chunk_minimum_value - 1] =
-                        PointerGetDatum(DatumToBytea(chunk->minimumValue,
-                                                     &tupleDescriptor->attrs[columnIndex]));
+                        PointerGetDatum(DatumToBytea(columnChunkSkipNode->minimumValue,
+                                                     &tupleDesc->attrs[columnIndex]));
+
                 values[Anum_columnar_chunk_maximum_value - 1] =
-                        PointerGetDatum(DatumToBytea(chunk->maximumValue,
-                                                     &tupleDescriptor->attrs[columnIndex]));
+                        PointerGetDatum(DatumToBytea(columnChunkSkipNode->maximumValue,
+                                                     &tupleDesc->attrs[columnIndex]));
             } else {
                 nulls[Anum_columnar_chunk_minimum_value - 1] = true;
                 nulls[Anum_columnar_chunk_maximum_value - 1] = true;
@@ -496,20 +547,22 @@ SaveStripeSkipList(RelFileNode relfilenode, uint64 stripe, StripeSkipList *chunk
     }
 
     FinishModifyRelation(modifyState);
-    table_close(columnarChunk, RowExclusiveLock);
+
+    table_close(columnarChunkTable, RowExclusiveLock);
 }
 
 
-/*
- * SaveChunkGroups saves the metadata for given chunk groups in columnar.chunk_group.
- */
-void
-SaveChunkGroups(RelFileNode relfilenode, uint64 stripe,
-                List *chunkGroupRowCounts) {
+// saves the metadata for given chunk groups to columnar.chunk_group.
+void SaveChunkGroups(RelFileNode relfilenode,
+                     uint64 stripeId,
+                     List *chunkGroupRowCounts) {
+
     uint64 storageId = LookupStorageId(relfilenode);
-    Oid columnarChunkGroupOid = ColumnarChunkGroupRelationId();
-    Relation columnarChunkGroup = table_open(columnarChunkGroupOid, RowExclusiveLock);
-    ModifyState *modifyState = StartModifyRelation(columnarChunkGroup);
+
+    Oid columnarChunkGroupTableOid = ColumnarChunkGroupRelationId();
+    Relation columnarChunkGroupTable = table_open(columnarChunkGroupTableOid, RowExclusiveLock);
+
+    ModifyState *modifyState = StartModifyRelation(columnarChunkGroupTable);
 
     ListCell *lc = NULL;
     int chunkId = 0;
@@ -518,7 +571,7 @@ SaveChunkGroups(RelFileNode relfilenode, uint64 stripe,
         int64 rowCount = lfirst_int(lc);
         Datum values[Natts_columnar_chunkgroup] = {
                 UInt64GetDatum(storageId),
-                Int64GetDatum(stripe),
+                Int64GetDatum(stripeId),
                 Int32GetDatum(chunkId),
                 Int64GetDatum(rowCount)
         };
@@ -530,7 +583,8 @@ SaveChunkGroups(RelFileNode relfilenode, uint64 stripe,
     }
 
     FinishModifyRelation(modifyState);
-    table_close(columnarChunkGroup, NoLock);
+
+    table_close(columnarChunkGroupTable, NoLock);
 }
 
 
@@ -562,9 +616,9 @@ ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe, TupleDesc tupleDescri
     StripeSkipList *chunkList = palloc0(sizeof(StripeSkipList));
     chunkList->chunkCount = chunkCount;
     chunkList->columnCount = columnCount;
-    chunkList->chunkSkipNodeArray = palloc0(columnCount * sizeof(ColumnChunkSkipNode *));
+    chunkList->columnChunkSkipNodeArray = palloc0(columnCount * sizeof(ColumnChunkSkipNode *));
     for (columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-        chunkList->chunkSkipNodeArray[columnIndex] =
+        chunkList->columnChunkSkipNodeArray[columnIndex] =
                 palloc0(chunkCount * sizeof(ColumnChunkSkipNode));
     }
 
@@ -592,7 +646,7 @@ ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe, TupleDesc tupleDescri
         columnIndex = attr - 1;
 
         ColumnChunkSkipNode *chunk =
-                &chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
+                &chunkList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
         chunk->rowCount = DatumGetInt64(datumArray[Anum_columnar_chunk_value_count -
                                                    1]);
         chunk->valueChunkOffset =
@@ -928,9 +982,11 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
  * InsertEmptyStripeMetadataRow adds a row to columnar.stripe for the empty
  * stripe reservation made for stripeId.
  */
-static void
-InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId, uint32 columnCount,
-                             uint32 chunkGroupRowCount, uint64 firstRowNumber) {
+static void InsertEmptyStripeMetadataRow(uint64 storageId,
+                                         uint64 stripeId,
+                                         uint32 columnCount,
+                                         uint32 chunkGroupRowLimit,
+                                         uint64 firstRowNumber) {
     bool nulls[Natts_columnar_stripe] = {false};
 
     Datum values[Natts_columnar_stripe] = {0};
@@ -941,7 +997,7 @@ InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId, uint32 columnCou
     values[Anum_columnar_stripe_column_count - 1] =
             UInt32GetDatum(columnCount);
     values[Anum_columnar_stripe_chunk_row_count - 1] =
-            UInt32GetDatum(chunkGroupRowCount);
+            UInt32GetDatum(chunkGroupRowLimit);
     values[Anum_columnar_stripe_first_row_number - 1] =
             UInt64GetDatum(firstRowNumber);
 
@@ -1034,41 +1090,47 @@ GetHighestUsedAddressAndId(uint64 storageId,
  * and inserts it into columnar.stripe. It is guaranteed that concurrent
  * writes won't overwrite the returned stripe.
  */
-EmptyStripeReservation *
-ReserveEmptyStripe(Relation rel, uint64 columnCount, uint64 chunkGroupRowCount,
-                   uint64 stripeRowCount) {
-    EmptyStripeReservation *stripeReservation = palloc0(sizeof(EmptyStripeReservation));
+EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable,
+                                           uint64 columnCount,
+                                           uint64 chunkGroupRowLimit,
+                                           uint64 stripeRowCount) {
+    EmptyStripeReservation *emptyStripeReservation = palloc0(sizeof(EmptyStripeReservation));
 
-    uint64 storageId = ColumnarStorageGetStorageId(rel, false);
+    uint64 storageId = ColumnarStorageGetStorageId(targetTable, false);
 
-    stripeReservation->stripeId = ColumnarStorageReserveStripeId(rel);
-    stripeReservation->stripeFirstRowNumber =
-            ColumnarStorageReserveRowNumber(rel, stripeRowCount);
+    emptyStripeReservation->stripeId = ColumnarStorageReserveStripeId(targetTable);
+    emptyStripeReservation->stripeFirstRowNumber = ColumnarStorageReserveRowNumber(targetTable, stripeRowCount);
 
     /*
      * XXX: Instead of inserting a dummy entry to columnar.stripe and
      * updating it when flushing the stripe, we could have a hash table
      * in shared memory for the bookkeeping of ongoing writes.
      */
-    InsertEmptyStripeMetadataRow(storageId, stripeReservation->stripeId,
-                                 columnCount, chunkGroupRowCount,
-                                 stripeReservation->stripeFirstRowNumber);
+    InsertEmptyStripeMetadataRow(storageId,
+                                 emptyStripeReservation->stripeId,
+                                 columnCount,
+                                 chunkGroupRowLimit,
+                                 emptyStripeReservation->stripeFirstRowNumber);
 
-    return stripeReservation;
+    return emptyStripeReservation;
 }
 
 
 /*
- * CompleteStripeReservation completes reservation of the stripe with
- * stripeId for given size and in-place updates related stripe metadata tuple
- * to complete reservation.
+ * update columnar.stripe表的 对应 storageId stripeId 的那条记录
+ * completes reservation of the stripe with stripeId under given size
+ * in-place updates related stripe metadata tuple to complete reservation.
  */
-StripeMetadata *
-CompleteStripeReservation(Relation rel, uint64 stripeId, uint64 sizeBytes,
-                          uint64 rowCount, uint64 chunkCount) {
-    uint64 resLogicalStart = ColumnarStorageReserveData(rel, sizeBytes);
-    uint64 storageId = ColumnarStorageGetStorageId(rel, false);
+StripeMetadata *CompleteStripeReservation(Relation targetTable,
+                                          uint64 stripeId,
+                                          uint64 byteLen,
+                                          uint64 rowCount,
+                                          uint64 chunkCount) {
+    uint64 resLogicalStart = ColumnarStorageReserveData(targetTable, byteLen);
+    uint64 storageId = ColumnarStorageGetStorageId(targetTable, false);
 
+    // 以下是update内部管理用的表columnar.stripe,使用代码的套路进行update
+    // 要 减去 1的原因是 对应的宏是1起始的
     bool update[Natts_columnar_stripe] = {false};
     update[Anum_columnar_stripe_file_offset - 1] = true;
     update[Anum_columnar_stripe_data_length - 1] = true;
@@ -1077,7 +1139,7 @@ CompleteStripeReservation(Relation rel, uint64 stripeId, uint64 sizeBytes,
 
     Datum newValues[Natts_columnar_stripe] = {0};
     newValues[Anum_columnar_stripe_file_offset - 1] = Int64GetDatum(resLogicalStart);
-    newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
+    newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(byteLen);
     newValues[Anum_columnar_stripe_row_count - 1] = UInt64GetDatum(rowCount);
     newValues[Anum_columnar_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
 
@@ -1086,39 +1148,51 @@ CompleteStripeReservation(Relation rel, uint64 stripeId, uint64 sizeBytes,
 
 
 /*
+ * 实现对columnar.stipe表update 读取到 指定的 storageId 和 stripeId对应的行 对其修改
  * UpdateStripeMetadataRow updates stripe metadata tuple for the stripe with
  * stripeId according to given newValues and update arrays.
  * Note that this function shouldn't be used for the cases where any indexes
  * of stripe metadata should be updated according to modifications done.
  */
-static StripeMetadata *
-UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
-                        Datum *newValues) {
+static StripeMetadata *UpdateStripeMetadataRow(uint64 storageId,
+                                               uint64 stripeId,
+                                               bool *update,// 各个的column有没有变化是不是要update
+                                               Datum *newValues) {
     SnapshotData dirtySnapshot;
     InitDirtySnapshot(dirtySnapshot);
 
+    // index
     ScanKeyData scanKey[2];
-    ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
-                BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(storageId));
-    ScanKeyInit(&scanKey[1], Anum_columnar_stripe_stripe,
-                BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(stripeId));
+    ScanKeyInit(&scanKey[0],
+                Anum_columnar_stripe_storageid,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                Int32GetDatum(storageId));
+    ScanKeyInit(&scanKey[1],
+                Anum_columnar_stripe_stripe,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                Int32GetDatum(stripeId));
 
+
+    // 得到了表columnar.stripe的oid
     Oid columnarStripesOid = ColumnarStripeRelationId();
 
-    Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
+    Relation columnarStripeTable = table_open(columnarStripesOid, AccessShareLock);
     Relation columnarStripePkeyIndex = index_open(ColumnarStripePKeyIndexRelationId(),
                                                   AccessShareLock);
 
-    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes,
-                                                            columnarStripePkeyIndex,
-                                                            &dirtySnapshot, 2, scanKey);
+    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripeTable, // 表
+                                                            columnarStripePkeyIndex, // index
+                                                            &dirtySnapshot,
+                                                            2,
+                                                            scanKey);
 
+    // 更改之前的该行的数据
     HeapTuple oldTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
     if (!HeapTupleIsValid(oldTuple)) {
-        ereport(ERROR, (errmsg("attempted to modify an unexpected stripe, "
-                               "columnar storage with id=" UINT64_FORMAT
-                " does not have stripe with id=" UINT64_FORMAT,
-                        storageId, stripeId)));
+        ereport(ERROR, (errmsg("attempted to modify an unexpected stripe, columnar storage with id=" UINT64_FORMAT
+                " does not have stripe with id=" UINT64_FORMAT, storageId, stripeId)));
     }
 
     /*
@@ -1126,32 +1200,36 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
      * tuple, so we don't allow setting any Datum's to NULL values.
      */
     bool newNulls[Natts_columnar_stripe] = {false};
-    TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
-    HeapTuple modifiedTuple = heap_modify_tuple(oldTuple, tupleDescriptor,
-                                                newValues, newNulls, update);
+    TupleDesc tupleDesc = RelationGetDescr(columnarStripeTable);
 
-    heap_inplace_update(columnarStripes, modifiedTuple);
+    // 在old的基础上得到更改过的
+    HeapTuple modifiedTuple = heap_modify_tuple(oldTuple,
+                                                tupleDesc,
+                                                newValues,
+                                                newNulls,
+                                                update);
 
-    /*
-     * Existing tuple now contains modifications, because we used
-     * heap_inplace_update().
-     */
+    // 真正执行update
+    heap_inplace_update(columnarStripeTable, modifiedTuple);
+
+    // Existing tuple now contains modifications, because we used heap_inplace_update().
     HeapTuple newTuple = oldTuple;
 
     /*
      * Must not pass modifiedTuple, because BuildStripeMetadata expects a real
      * heap tuple with MVCC fields.
      */
-    StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripes,
+    StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripeTable,
                                                                  newTuple);
 
     CommandCounterIncrement();
 
+    // 关闭
     systable_endscan_ordered(scanDescriptor);
     index_close(columnarStripePkeyIndex, AccessShareLock);
-    table_close(columnarStripes, AccessShareLock);
+    table_close(columnarStripeTable, AccessShareLock);
 
-    /* return StripeMetadata object built from modified tuple */
+    // return StripeMetadata object built from modified tuple
     return modifiedStripeMetadata;
 }
 
@@ -1193,36 +1271,39 @@ ReadDataFileStripeList(uint64 storageId, Snapshot snapshot) {
 }
 
 
-/*
+/**
  * BuildStripeMetadata builds a StripeMetadata object from given heap tuple.
- *
  * NB: heapTuple must be a proper heap tuple with MVCC fields.
+ *
+ * @param columnarStripes columnar.stripe表
+ * @param heapTuple columnar.stripe表上的1行的记录
+ * @return
  */
-static StripeMetadata *
-BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple) {
+static StripeMetadata *BuildStripeMetadata(Relation columnarStripes,
+                                           HeapTuple heapTuple) {
     Assert(RelationGetRelid(columnarStripes) == ColumnarStripeRelationId());
 
     Datum datumArray[Natts_columnar_stripe];
     bool isNullArray[Natts_columnar_stripe];
-    heap_deform_tuple(heapTuple, RelationGetDescr(columnarStripes),
-                      datumArray, isNullArray);
 
+    // 把heapTuple转化为 Datum数组
+    heap_deform_tuple(heapTuple,
+                      RelationGetDescr(columnarStripes),
+                      datumArray,
+                      isNullArray);
+
+    // 几乎是 columnar.strip表对应的model
     StripeMetadata *stripeMetadata = palloc0(sizeof(StripeMetadata));
+
+    // strip表的行数据 注入
     stripeMetadata->id = DatumGetInt64(datumArray[Anum_columnar_stripe_stripe - 1]);
-    stripeMetadata->fileOffset = DatumGetInt64(
-            datumArray[Anum_columnar_stripe_file_offset - 1]);
-    stripeMetadata->dataLength = DatumGetInt64(
-            datumArray[Anum_columnar_stripe_data_length - 1]);
-    stripeMetadata->columnCount = DatumGetInt32(
-            datumArray[Anum_columnar_stripe_column_count - 1]);
-    stripeMetadata->chunkCount = DatumGetInt32(
-            datumArray[Anum_columnar_stripe_chunk_count - 1]);
-    stripeMetadata->chunkGroupRowCount = DatumGetInt32(
-            datumArray[Anum_columnar_stripe_chunk_row_count - 1]);
-    stripeMetadata->rowCount = DatumGetInt64(
-            datumArray[Anum_columnar_stripe_row_count - 1]);
-    stripeMetadata->firstRowNumber = DatumGetUInt64(
-            datumArray[Anum_columnar_stripe_first_row_number - 1]);
+    stripeMetadata->fileOffset = DatumGetInt64(datumArray[Anum_columnar_stripe_file_offset - 1]);
+    stripeMetadata->dataLength = DatumGetInt64(datumArray[Anum_columnar_stripe_data_length - 1]);
+    stripeMetadata->columnCount = DatumGetInt32(datumArray[Anum_columnar_stripe_column_count - 1]);
+    stripeMetadata->chunkCount = DatumGetInt32(datumArray[Anum_columnar_stripe_chunk_count - 1]);
+    stripeMetadata->chunkGroupRowCount = DatumGetInt32(datumArray[Anum_columnar_stripe_chunk_row_count - 1]);
+    stripeMetadata->rowCount = DatumGetInt64(datumArray[Anum_columnar_stripe_row_count - 1]);
+    stripeMetadata->firstRowNumber = DatumGetUInt64(datumArray[Anum_columnar_stripe_first_row_number - 1]);
 
     /*
      * If there is unflushed data in a parent transaction, then we would
@@ -1232,10 +1313,9 @@ BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple) {
      * subtransaction id here.
      */
     TransactionId entryXmin = HeapTupleHeaderGetXmin(heapTuple->t_data);
-    stripeMetadata->aborted = !TransactionIdIsInProgress(entryXmin) &&
-                              TransactionIdDidAbort(entryXmin);
-    stripeMetadata->insertedByCurrentXact =
-            TransactionIdIsCurrentTransactionId(entryXmin);
+
+    stripeMetadata->aborted = !TransactionIdIsInProgress(entryXmin) && TransactionIdDidAbort(entryXmin);
+    stripeMetadata->insertedByCurrentXact = TransactionIdIsCurrentTransactionId(entryXmin);
 
     CheckStripeMetadataConsistency(stripeMetadata);
 
@@ -1317,13 +1397,12 @@ DeleteStorageFromColumnarMetadataTable(Oid metadataTableId,
 /*
  * StartModifyRelation allocates resources for modifications.
  */
-static ModifyState *
-StartModifyRelation(Relation rel) {
-    EState *estate = create_estate_for_relation(rel);
+static ModifyState *StartModifyRelation(Relation relation) {
+    EState *estate = create_estate_for_relation(relation);
 
 #if PG_VERSION_NUM >= PG_VERSION_14
     ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
-    InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
+    InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
 #else
     ResultRelInfo *resultRelInfo = estate->es_result_relation_info;
 #endif
@@ -1332,7 +1411,7 @@ StartModifyRelation(Relation rel) {
     ExecOpenIndices(resultRelInfo, false);
 
     ModifyState *modifyState = palloc(sizeof(ModifyState));
-    modifyState->rel = rel;
+    modifyState->rel = relation;
     modifyState->estate = estate;
     modifyState->resultRelInfo = resultRelInfo;
 
@@ -1344,18 +1423,23 @@ StartModifyRelation(Relation rel) {
  * InsertTupleAndEnforceConstraints inserts a tuple into a relation and makes
  * sure constraints are enforced and indexes are updated.
  */
-static void
-InsertTupleAndEnforceConstraints(ModifyState *state, Datum *values, bool *nulls) {
-    TupleDesc tupleDescriptor = RelationGetDescr(state->rel);
-    HeapTuple tuple = heap_form_tuple(tupleDescriptor, values, nulls);
+static void InsertTupleAndEnforceConstraints(ModifyState *modifyState,
+                                             Datum *values,
+                                             bool *nulls) {
+    TupleDesc tupleDesc = RelationGetDescr(modifyState->rel);
 
-    TupleTableSlot *slot = ExecInitExtraTupleSlot(state->estate, tupleDescriptor,
-                                                  &TTSOpsHeapTuple);
+    HeapTuple heapTuple = heap_form_tuple(tupleDesc,
+                                          values,
+                                          nulls);
 
-    ExecStoreHeapTuple(tuple, slot, false);
+    TupleTableSlot *tupleTableSlot = ExecInitExtraTupleSlot(modifyState->estate,
+                                                            tupleDesc,
+                                                            &TTSOpsHeapTuple);
+
+    ExecStoreHeapTuple(heapTuple, tupleTableSlot, false);
 
     /* use ExecSimpleRelationInsert to enforce constraints */
-    ExecSimpleRelationInsert_compat(state->resultRelInfo, state->estate, slot);
+    ExecSimpleRelationInsert_compat(modifyState->resultRelInfo, modifyState->estate, tupleTableSlot);
 }
 
 
@@ -1384,12 +1468,14 @@ FinishModifyRelation(ModifyState *state) {
     ExecCloseIndices(state->resultRelInfo);
 
     AfterTriggerEndQuery(state->estate);
+
 #if PG_VERSION_NUM >= PG_VERSION_14
     ExecCloseResultRelations(state->estate);
     ExecCloseRangeTableRelations(state->estate);
 #else
     ExecCleanUpTriggerState(state->estate);
 #endif
+
     ExecResetTupleTable(state->estate->es_tupleTable, false);
     FreeExecutorState(state->estate);
 
@@ -1435,30 +1521,33 @@ create_estate_for_relation(Relation rel) {
 }
 
 
-/*
- * DatumToBytea serializes a datum into a bytea value.
- */
-static bytea *
-DatumToBytea(Datum value, Form_pg_attribute attrForm) {
+// DatumToBytea serializes a datum into a bytea value.
+static bytea *DatumToBytea(Datum value, Form_pg_attribute attrForm) {
     int datumLength = att_addlength_datum(0, attrForm->attlen, value);
     bytea *result = palloc0(datumLength + VARHDRSZ);
 
     SET_VARSIZE(result, datumLength + VARHDRSZ);
 
     if (attrForm->attlen > 0) {
-        if (attrForm->attbyval) {
+        if (attrForm->attbyval) { // 是值类型
             Datum tmp;
             store_att_byval(&tmp, value, attrForm->attlen);
 
-            memcpy_s(VARDATA(result), datumLength + VARHDRSZ,
-                     &tmp, attrForm->attlen);
-        } else {
-            memcpy_s(VARDATA(result), datumLength + VARHDRSZ,
-                     DatumGetPointer(value), attrForm->attlen);
+            memcpy_s(VARDATA(result),
+                     datumLength + VARHDRSZ,
+                     &tmp,
+                     attrForm->attlen);
+        } else { // 是指针的
+            memcpy_s(VARDATA(result),
+                     datumLength + VARHDRSZ,
+                     DatumGetPointer(value),
+                     attrForm->attlen);
         }
     } else {
-        memcpy_s(VARDATA(result), datumLength + VARHDRSZ,
-                 DatumGetPointer(value), datumLength);
+        memcpy_s(VARDATA(result),
+                 datumLength + VARHDRSZ,
+                 DatumGetPointer(value),
+                 datumLength);
     }
 
     return result;
@@ -1527,8 +1616,7 @@ ColumnarStripeFirstRowNumberIndexRelationId(void) {
 /*
  * ColumnarOptionsRelationId returns relation id of columnar.options.
  */
-static Oid
-ColumnarOptionsRelationId(void) {
+static Oid ColumnarOptionsRelationId(void) {
     return get_relname_relid("options", ColumnarNamespaceId());
 }
 
@@ -1553,11 +1641,10 @@ ColumnarChunkRelationId(void) {
 
 
 /*
- * ColumnarChunkGroupRelationId returns relation id of columnar.chunk_group.
+ * 得到 columnar.chunk_group 的oid
  * TODO: should we cache this similar to citus?
  */
-static Oid
-ColumnarChunkGroupRelationId(void) {
+static Oid ColumnarChunkGroupRelationId(void) {
     return get_relname_relid("chunk_group", ColumnarNamespaceId());
 }
 
@@ -1593,13 +1680,12 @@ ColumnarNamespaceId(void) {
 
 
 /*
- * LookupStorageId reads storage metapage to find the storage ID for the given relfilenode. It returns
+ * LookupStorageId reads storage metapage to find the storage ID for the given relFileNode. It returns
  * false if the relation doesn't have a meta page yet.
  */
-static uint64
-LookupStorageId(RelFileNode relfilenode) {
-    Oid relationId = RelidByRelfilenode(relfilenode.spcNode,
-                                        relfilenode.relNode);
+static uint64 LookupStorageId(RelFileNode relFileNode) {
+    Oid relationId = RelidByRelfilenode(relFileNode.spcNode,
+                                        relFileNode.relNode);
 
     Relation relation = relation_open(relationId, AccessShareLock);
     uint64 storageId = ColumnarStorageGetStorageId(relation, false);
@@ -1609,12 +1695,8 @@ LookupStorageId(RelFileNode relfilenode) {
 }
 
 
-/*
- * ColumnarMetadataNewStorageId - create a new, unique storage id and return
- * it.
- */
-uint64
-ColumnarMetadataNewStorageId() {
+// ColumnarMetadataNewStorageId - create a new, unique storage id and return it
+uint64 ColumnarMetadataNewStorageId() {
     return nextval_internal(ColumnarStorageIdSequenceRelationId(), false);
 }
 
@@ -1644,8 +1726,7 @@ columnar_relation_storageid(PG_FUNCTION_ARGS) {
  * ColumnarStorageUpdateIfNeeded - upgrade columnar storage to the current version by
  * using information from the metadata tables.
  */
-void
-ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade) {
+void ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade) {
     if (ColumnarStorageIsCurrent(rel)) {
         return;
     }

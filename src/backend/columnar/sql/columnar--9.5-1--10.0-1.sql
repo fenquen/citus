@@ -12,7 +12,6 @@ CREATE TABLE options (
     compression_level int NOT NULL,
     compression name NOT NULL
 ) WITH (user_catalog_table = true);
-
 COMMENT ON TABLE options IS 'columnar table specific options, maintained by alter_columnar_table_set';
 
 CREATE TABLE stripe (
@@ -26,7 +25,6 @@ CREATE TABLE stripe (
     chunk_group_count int NOT NULL,
     PRIMARY KEY (storage_id, stripe_num)
 ) WITH (user_catalog_table = true);
-
 COMMENT ON TABLE stripe IS 'Columnar per stripe metadata';
 
 CREATE TABLE chunk_group (
@@ -37,7 +35,6 @@ CREATE TABLE chunk_group (
     PRIMARY KEY (storage_id, stripe_num, chunk_group_num),
     FOREIGN KEY (storage_id, stripe_num) REFERENCES stripe(storage_id, stripe_num) ON DELETE CASCADE
 );
-
 COMMENT ON TABLE chunk_group IS 'Columnar chunk group metadata';
 
 CREATE TABLE chunk (
@@ -58,7 +55,6 @@ CREATE TABLE chunk (
     PRIMARY KEY (storage_id, stripe_num, attr_num, chunk_group_num),
     FOREIGN KEY (storage_id, stripe_num, chunk_group_num) REFERENCES chunk_group(storage_id, stripe_num, chunk_group_num) ON DELETE CASCADE
 ) WITH (user_catalog_table = true);
-
 COMMENT ON TABLE chunk IS 'Columnar per chunk metadata';
 
 DO $proc$

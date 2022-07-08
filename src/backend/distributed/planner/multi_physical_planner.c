@@ -1377,10 +1377,10 @@ GetColumnOriginalIndexes(Oid relationId)
 {
 	List *originalIndexes = NIL;
 	Relation relation = table_open(relationId, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(relation);
-	for (int columnIndex = 0; columnIndex < tupleDescriptor->natts; columnIndex++)
+	TupleDesc tupleDesc = RelationGetDescr(relation);
+	for (int columnIndex = 0; columnIndex < tupleDesc->natts; columnIndex++)
 	{
-		Form_pg_attribute currentColumn = TupleDescAttr(tupleDescriptor, columnIndex);
+		Form_pg_attribute currentColumn = TupleDescAttr(tupleDesc, columnIndex);
 		if (currentColumn->attisdropped)
 		{
 			continue;

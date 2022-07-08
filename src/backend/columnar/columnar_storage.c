@@ -14,9 +14,9 @@
  * Higher-level columnar operations deal with logical offsets and large
  * contiguous buffers of data that need to be stored. But the buffer manager
  * and WAL depend on formatted pages with headers, so these large buffers need
- * to be written across many pages. This module translates the contiguous
- * buffers into individual block reads/writes, and performs WAL when
- * necessary.
+ * to be written across many pages.
+ *
+ * This module translates the contiguous buffers into individual block reads/writes, do WAL when necessary.
  *
  * Storage layout: a metapage in block 0, followed by an empty page in block
  * 1, followed by logical data starting at the first byte after the page
@@ -46,29 +46,21 @@
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
 
-
-/*
- * Content of the first page in main fork, which stores metadata at file
- * level.
- */
+// Content of the first page in main fork, which stores metadata at file level
 typedef struct ColumnarMetapage {
-    /*
-     * Store version of file format used, so we can detect files from
-     * previous versions if we change file format.
-     */
+    // Store version of file format used, so we can detect files from previous versions if we change file format.
     uint32 versionMajor;
     uint32 versionMinor;
 
     /*
      * Each of the metadata table rows are identified by a storageId.
-     * We store it also in the main fork so we can link metadata rows
-     * with data files.
+     * We store it also in the main fork then we can link metadata rows with data files.
      */
     uint64 storageId;
 
-    uint64 reservedStripeId; /* first unused stripe id */
-    uint64 reservedRowNumber; /* first unused row number */
-    uint64 reservedOffset; /* first unused byte offset */
+    uint64 reservedStripeId; // first unused stripe id,1是起始
+    uint64 reservedRowNumber; // first unused row number,1是起始
+    uint64 reservedOffset; // first unused byte offset
 
     /*
      * Flag set to true in the init fork. After an unlogged table reset (due
@@ -76,8 +68,7 @@ typedef struct ColumnarMetapage {
      * trying to read an unlogged table, if this flag is set to true, we must
      * clear the metadata for the table (because the actual data is gone,
      * too), and clear the flag. We can cross-check that the table is
-     * UNLOGGED, and that the main fork is at the minimum size (no actual
-     * data).
+     * UNLOGGED, and that the main fork is at the minimum size (no actual data).
      *
      * XXX: Not used yet; reserved field for later support for UNLOGGED.
      */
@@ -85,7 +76,7 @@ typedef struct ColumnarMetapage {
 } ColumnarMetapage;
 
 
-/* represents a "physical" block+offset address */
+// 表示是在哪个block的哪个offset, represents a "physical" block+offset address
 typedef struct PhysicalAddr {
     BlockNumber blockno;
     uint32 offset;
@@ -94,6 +85,7 @@ typedef struct PhysicalAddr {
 
 #define COLUMNAR_METAPAGE_BLOCKNO 0
 #define COLUMNAR_EMPTY_BLOCKNO 1
+
 #define COLUMNAR_INVALID_STRIPE_ID 0
 #define COLUMNAR_FIRST_STRIPE_ID 1
 
@@ -106,17 +98,15 @@ typedef struct PhysicalAddr {
 PG_FUNCTION_INFO_V1(test_columnar_storage_write_new_page);
 
 
-/*
- * Map logical offsets to a physical page and offset where the data is kept.
- */
-static inline PhysicalAddr
-LogicalToPhysical(uint64 logicalOffset) {
-    PhysicalAddr addr;
+// 用来确定是在哪个block上的哪个offset
+// Map logical offsets to a physical page and offset where the data is kept.
+static inline PhysicalAddr LogicalToPhysical(uint64 logicalOffset) {
+    PhysicalAddr physicalAddr;
 
-    addr.blockno = logicalOffset / COLUMNAR_BYTES_PER_PAGE;
-    addr.offset = SizeOfPageHeaderData + (logicalOffset % COLUMNAR_BYTES_PER_PAGE);
+    physicalAddr.blockno = logicalOffset / COLUMNAR_BYTES_PER_PAGE;
+    physicalAddr.offset = SizeOfPageHeaderData + (logicalOffset % COLUMNAR_BYTES_PER_PAGE);
 
-    return addr;
+    return physicalAddr;
 }
 
 
@@ -132,13 +122,13 @@ PhysicalToLogical(PhysicalAddr addr) {
 static void ColumnarOverwriteMetapage(Relation relation,
                                       ColumnarMetapage columnarMetapage);
 
-static ColumnarMetapage ColumnarMetapageRead(Relation rel, bool force);
+static ColumnarMetapage ColumnarMetapageRead(Relation relation, bool force);
 
-static void ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset,
-                          char *buf, uint32 len, bool force);
+static void ReadFromBlock(Relation relation, BlockNumber blockno, uint32 offset,
+                          char *dest, uint32 len, bool force);
 
-static void WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset,
-                         char *buf, uint32 len, bool clear);
+static void WriteToBlock(Relation relation, BlockNumber blockno, uint32 offset,
+                         char *buf, uint32 length, bool clear);
 
 static uint64 AlignReservation(uint64 prevReservation);
 
@@ -148,57 +138,63 @@ static bool ColumnarMetapageIsOlder(ColumnarMetapage *metapage);
 
 static bool ColumnarMetapageIsNewer(ColumnarMetapage *metapage);
 
-static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage);
-
+static void ColumnarMetapageCheckVersion(Relation relation, ColumnarMetapage *columnarMetapage);
 
 /*
- * ColumnarStorageInit - initialize a new metapage in an empty relation
- * with the given storageId.
+ * 裸生成page 把 columnarMetapage 写入 然后smgrwrite落地到 硬盘
+ * initialize a new ColumnarMetapage in an empty relation with the given storageId.
  *
  * Caller must hold AccessExclusiveLock on the relation.
  */
-void
-ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
+void ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
     BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
     if (nblocks > 0) {
-        elog(ERROR,
-             "attempted to initialize metapage, but %d pages already exist",
-             nblocks);
+        elog(ERROR, "attempted to initialize columnarMetapage, but %d pages already exist", nblocks);
     }
 
-    /* create two pages */
-    PGAlignedBlock block;
-    Page page = block.data;
+    // create two pages 各自用在 columnarMetapage 和 empty page
+    PGAlignedBlock pgAlignedBlock;
+    // page只是个内存中的中转容器和byteBuffer类似 下边会在这相同的page上调用2趟PageInit
+    Page page = pgAlignedBlock.data;
 
-    /* write metapage */
+    ColumnarMetapage columnarMetapage = {0};
+    columnarMetapage.storageId = storageId;
+    columnarMetapage.versionMajor = COLUMNAR_VERSION_MAJOR;
+    columnarMetapage.versionMinor = COLUMNAR_VERSION_MINOR;
+    columnarMetapage.reservedStripeId = COLUMNAR_FIRST_STRIPE_ID;  // 1
+    columnarMetapage.reservedRowNumber = COLUMNAR_FIRST_ROW_NUMBER; // 1
+    columnarMetapage.reservedOffset = ColumnarFirstLogicalOffset;
+    columnarMetapage.unloggedReset = false;
+
+    /* write columnarMetapage */
     PageInit(page, BLCKSZ, 0);
-    PageHeader phdr = (PageHeader) page;
 
-    ColumnarMetapage metapage = {0};
-    metapage.storageId = storageId;
-    metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
-    metapage.versionMinor = COLUMNAR_VERSION_MINOR;
-    metapage.reservedStripeId = COLUMNAR_FIRST_STRIPE_ID;
-    metapage.reservedRowNumber = COLUMNAR_FIRST_ROW_NUMBER;
-    metapage.reservedOffset = ColumnarFirstLogicalOffset;
-    metapage.unloggedReset = false;
-    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
-             (char *) &metapage, sizeof(ColumnarMetapage));
-    phdr->pd_lower += sizeof(ColumnarMetapage);
+    // 本质上的内存copy写入columnarMetapage数据
+    PageHeader pageHeader = (PageHeader) page;
+    memcpy_s(page + pageHeader->pd_lower,
+             pageHeader->pd_upper - pageHeader->pd_lower,
+             (char *) &columnarMetapage,
+             sizeof(ColumnarMetapage));
+    pageHeader->pd_lower += sizeof(ColumnarMetapage);
 
     PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
     smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
-    log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-                COLUMNAR_METAPAGE_BLOCKNO, page, true);
+    log_newpage(&srel->smgr_rnode.node,
+                MAIN_FORKNUM,
+                COLUMNAR_METAPAGE_BLOCKNO,
+                page,
+                true);
 
-    /* write empty page */
+    // write empty page 起始是对page什么都不干直接smgrwrite
     PageInit(page, BLCKSZ, 0);
-
     PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
     smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
-    log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-                COLUMNAR_EMPTY_BLOCKNO, page, true);
+    log_newpage(&srel->smgr_rnode.node,
+                MAIN_FORKNUM,
+                COLUMNAR_EMPTY_BLOCKNO,
+                page,
+                true);
 
     /*
      * An immediate sync is required even if we xlog'd the page, because the
@@ -281,16 +277,14 @@ ColumnarStorageGetVersionMinor(Relation rel, bool force) {
 
 
 /*
- * ColumnarStorageGetStorageId - return storage ID from the metapage.
+ * return storage ID from the metapage.
  *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
+ * Throw an error if the metapage is not the current version, unless 'force' is true.
  */
-uint64
-ColumnarStorageGetStorageId(Relation rel, bool force) {
-    ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
+uint64 ColumnarStorageGetStorageId(Relation relation, bool force) {
+    ColumnarMetapage columnarMetapageRead = ColumnarMetapageRead(relation, force);
 
-    return metapage.storageId;
+    return columnarMetapageRead.storageId;
 }
 
 
@@ -378,63 +372,59 @@ ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows) {
 
 
 /*
- * ColumnarStorageReserveStripeId returns stripeId and advances it for next
- * stripeId reservation.
+ * returns stripeId and advances it for next stripeId reservation.
  * Note that this function doesn't handle row number reservation.
  * See ColumnarStorageReserveRowNumber function.
  */
-uint64
-ColumnarStorageReserveStripeId(Relation rel) {
-    LockRelationForExtension(rel, ExclusiveLock);
+uint64 ColumnarStorageReserveStripeId(Relation targetTable) {
+    LockRelationForExtension(targetTable, ExclusiveLock);
 
-    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage columnarMetapage = ColumnarMetapageRead(targetTable, false);
 
-    uint64 stripeId = metapage.reservedStripeId;
-    metapage.reservedStripeId++;
+    uint64 stripeId = columnarMetapage.reservedStripeId;
+    columnarMetapage.reservedStripeId++;
 
-    ColumnarOverwriteMetapage(rel, metapage);
+    ColumnarOverwriteMetapage(targetTable, columnarMetapage);
 
-    UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(targetTable, ExclusiveLock);
 
     return stripeId;
 }
 
 
-/*
- * ColumnarStorageReserveData - reserve logical data offsets for writing.
- */
-uint64
-ColumnarStorageReserveData(Relation rel, uint64 amount) {
-    if (amount == 0) {
+// reserve logical data offsets for writing
+uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen) {
+    if (byteLen == 0) {
         return ColumnarInvalidLogicalOffset;
     }
 
-    LockRelationForExtension(rel, ExclusiveLock);
+    LockRelationForExtension(targetTable, ExclusiveLock);
 
-    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    // 把 columnarMetapage 从 block page 读取出来
+    ColumnarMetapage columnarMetapage = ColumnarMetapageRead(targetTable, false);
 
-    uint64 alignedReservation = AlignReservation(metapage.reservedOffset);
-    uint64 nextReservation = alignedReservation + amount;
-    metapage.reservedOffset = nextReservation;
+    uint64 alignedReservation = AlignReservation(columnarMetapage.reservedOffset);
+    uint64 nextReservation = alignedReservation + byteLen;
+    columnarMetapage.reservedOffset = nextReservation;
 
-    /* write new reservation */
-    ColumnarOverwriteMetapage(rel, metapage);
+    // write new reservation
+    ColumnarOverwriteMetapage(targetTable, columnarMetapage);
 
     /* last used PhysicalAddr of new reservation */
     PhysicalAddr final = LogicalToPhysical(nextReservation - 1);
 
     /* extend with new pages */
-    RelationOpenSmgr(rel);
-    BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+    RelationOpenSmgr(targetTable);
+    BlockNumber nblocks = smgrnblocks(targetTable->rd_smgr, MAIN_FORKNUM);
 
     while (nblocks <= final.blockno) {
-        Buffer newBuffer = ReadBuffer(rel, P_NEW);
+        Buffer newBuffer = ReadBuffer(targetTable, P_NEW);
         Assert(BufferGetBlockNumber(newBuffer) == nblocks);
         ReleaseBuffer(newBuffer);
         nblocks++;
     }
 
-    UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(targetTable, ExclusiveLock);
 
     return alignedReservation;
 }
@@ -472,34 +462,36 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
 }
 
 
-/*
- * ColumnarStorageWrite - map the logical offset to a block and offset, then
- * write the buffer across multiple blocks if necessary.
- */
-void
-ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amount) {
+// map the logical offset to a block and offset, then write the buffer across multiple blocks if necessary
+void ColumnarStorageWrite(Relation relation,
+                          uint64 logicalOffset,
+                          char *data,
+                          uint32 length) {
     /* if there's no work to do, succeed even with invalid offset */
-    if (amount == 0) {
+    if (length == 0) {
         return;
     }
 
     if (!ColumnarLogicalOffsetIsValid(logicalOffset)) {
-        elog(ERROR,
-             "attempted columnar write on relation %d to invalid logical offset: "
-                     UINT64_FORMAT,
-             rel->rd_id, logicalOffset);
+        elog(ERROR, "attempted columnar write on relation %d to invalid logical offset: " UINT64_FORMAT,
+             relation->rd_id, logicalOffset);
     }
 
-    uint64 written = 0;
+    uint64 totalWrittenByteLength = 0;
 
-    while (written < amount) {
-        PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
+    while (totalWrittenByteLength < length) {
+        PhysicalAddr physicalAddr = LogicalToPhysical(logicalOffset + totalWrittenByteLength);
 
-        uint64 to_write = Min(amount - written, BLCKSZ - addr.offset);
-        WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
+        uint64 writtenByteLength = Min(length - totalWrittenByteLength, BLCKSZ - physicalAddr.offset);
+
+        WriteToBlock(relation,
+                     physicalAddr.blockno,
+                     physicalAddr.offset,
+                     data + totalWrittenByteLength,
+                     writtenByteLength,
                      false);
 
-        written += to_write;
+        totalWrittenByteLength += writtenByteLength;
     }
 }
 
@@ -573,8 +565,7 @@ ColumnarStorageTruncate(Relation rel, uint64 newDataReservation) {
  * ColumnarOverwriteMetapage writes given columnarMetapage back to metapage
  * for given relation.
  */
-static void
-ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage) {
+static void ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage) {
     /* clear metapage because we are overwriting */
     bool clear = true;
     WriteToBlock(relation, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
@@ -583,7 +574,8 @@ ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage) 
 
 
 /*
- * ColumnarMetapageRead - read the current contents of the metapage. Error if
+ * 暴力的直接的从 文件系统中 结合 page体系 读取 columnarMetapage
+ * read the current contents of the metapage. Error if
  * it does not exist. Throw an error if the metapage is not the current
  * version, unless 'force' is true.
  *
@@ -593,93 +585,114 @@ ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage) 
  * set properly when we read an old metapage; an old metapage should only be
  * read for the purposes of upgrading or error checking.
  */
-static ColumnarMetapage
-ColumnarMetapageRead(Relation rel, bool force) {
-    RelationOpenSmgr(rel);
-    BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+static ColumnarMetapage ColumnarMetapageRead(Relation relation, bool force) {
+    RelationOpenSmgr(relation);
+    /*
+     * pg里的每个表（relation）可能会有四种分支，按分支编号顺序依次为0、1、2、3
+     * 0号分支为主数据文件，如果表数据未超过编译时设置的segsize(默认为1G)，否则会生成filenode.2,filenode.3的新文件
+     * 1号分支filenode_fsm为空闲空间信息文件
+     * 2号分支filenode_vm为可见性信息文件
+     * 3号分支filenode_init通常为不记录WAL日志的表与索引
+     */
+    BlockNumber nblocks = smgrnblocks(relation->rd_smgr, MAIN_FORKNUM);
     if (nblocks == 0) {
         /*
          * We only expect this to happen when upgrading citus.so. This is because,
-         * in current version of columnar, we immediately create the metapage
+         * in current version of columnar, we immediately create the columnarMetapage
          * for columnar tables, i.e right after creating the table.
          * However in older versions, we were creating metapages lazily, i.e
          * when ingesting data to columnar table.
          */
-        ereport(ERROR, (errmsg("columnar metapage for relation \"%s\" does not exist",
-                               RelationGetRelationName(rel)),
+        ereport(ERROR, (errmsg("columnar columnarMetapage for relation \"%s\" does not exist",
+                               RelationGetRelationName(relation)),
                 errhint(OLD_METAPAGE_VERSION_HINT)));
     }
 
     /*
-     * Regardless of "force" parameter, always force read metapage block.
-     * We will check metapage version in ColumnarMetapageCheckVersion
-     * depending on "force".
+     * Regardless of "force" parameter, always force read columnarMetapage block.
+     * We will check columnarMetapage version in ColumnarMetapageCheckVersion depending on "force".
      */
     bool forceReadBlock = true;
-    ColumnarMetapage metapage;
-    ReadFromBlock(rel, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-                  (char *) &metapage, sizeof(ColumnarMetapage), forceReadBlock);
+
+    ColumnarMetapage columnarMetapage;
+
+    // 把 columnarMetapage 从 block page 读取出来
+    ReadFromBlock(relation,
+                  COLUMNAR_METAPAGE_BLOCKNO,
+                  SizeOfPageHeaderData,
+                  (char *) &columnarMetapage,
+                  sizeof(ColumnarMetapage),
+                  forceReadBlock);
 
     if (!force) {
-        ColumnarMetapageCheckVersion(rel, &metapage);
+        ColumnarMetapageCheckVersion(relation, &columnarMetapage);
     }
 
-    return metapage;
+    return columnarMetapage;
 }
 
 
 /*
  * ReadFromBlock - read bytes from a page at the given offset. If 'force' is
- * true, don't check pd_lower; useful when reading a metapage of unknown
- * version.
+ * true, don't check pd_lower; useful when reading a metapage of unknown version.
  */
-static void
-ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
-              uint32 len, bool force) {
-    Buffer buffer = ReadBuffer(rel, blockno);
-    LockBuffer(buffer, BUFFER_LOCK_SHARE);
-    Page page = BufferGetPage(buffer);
-    PageHeader phdr = (PageHeader) page;
+static void ReadFromBlock(Relation relation,
+                          BlockNumber blockno,
+                          uint32 offset,// pd_linp
+                          char *dest,
+                          uint32 len,
+                          bool force) {
+    Buffer buffer = ReadBuffer(relation, blockno);
 
-    if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len))) {
+    LockBuffer(buffer, BUFFER_LOCK_SHARE);
+
+    Page page = BufferGetPage(buffer);
+    PageHeader pageHeader = (PageHeader) page;
+
+    // pageHeader->pd_lower < offset + len 意思是 不应该越过 指针数据 边线
+    if (BLCKSZ < offset + len || (!force && (pageHeader->pd_lower < offset + len))) {
         elog(ERROR,
              "attempt to read columnar data of length %d from offset %d of block %d of relation %d",
-             len, offset, blockno, rel->rd_id);
+             len, offset, blockno, relation->rd_id);
     }
 
-    memcpy_s(buf, len, page + offset, len);
+    memcpy_s(dest, len, page + offset, len);
+
     UnlockReleaseBuffer(buffer);
 }
-
 
 /*
  * WriteToBlock - append data to a block, initializing if necessary, and emit
  * WAL. If 'clear' is true, always clear the data on the page and reinitialize
  * it first, and offset must be SizeOfPageHeaderData. Otherwise, offset must
- * be equal to pd_lower and pd_lower will be set to the end of the written
- * data.
+ * be equal to pd_lower and pd_lower will be set to the end of the written data.
  */
-static void
-WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
-             uint32 len, bool clear) {
-    Buffer buffer = ReadBuffer(rel, blockno);
+static void WriteToBlock(Relation relation,
+                         BlockNumber blockno, uint32 offset,
+                         char *buf, uint32 length,
+                         bool clear) {
+
+    Buffer buffer = ReadBuffer(relation, blockno);
+
+    // lock
     LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
     Page page = BufferGetPage(buffer);
-    PageHeader phdr = (PageHeader) page;
+    PageHeader pageHeader = (PageHeader) page;
+
     if (PageIsNew(page) || clear) {
         PageInit(page, BLCKSZ, 0);
     }
 
-    if (phdr->pd_lower < offset || phdr->pd_upper - offset < len) {
-        elog(ERROR,
-             "attempt to write columnar data of length %d to offset %d of block %d of relation %d",
-             len, offset, blockno, rel->rd_id);
+    // 起始按照理想的情况 pageHeader->pd_lower 等于 offset
+    if (pageHeader->pd_lower < offset || pageHeader->pd_upper - offset < length) {
+        elog(ERROR, "attempt to write columnar data of length %d to offset %d of block %d of relation %d",
+             length, offset, blockno, relation->rd_id);
     }
 
     /*
      * After a transaction has been rolled-back, we might be
-     * over-writing the rolledback write, so phdr->pd_lower can be
+     * over-writing the rolledback write, so pageHeader->pd_lower can be
      * different from addr.offset.
      *
      * We reset pd_lower to reset the rolledback write.
@@ -689,26 +702,26 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
      * failed in an older version of columnar, but now user attempts writing
      * to that table in version >= 10.2.
      */
-    if (phdr->pd_lower > offset) {
+    if (pageHeader->pd_lower > offset) {
         ereport(DEBUG4, (errmsg("overwriting page %u", blockno),
                 errdetail("This can happen after a roll-back.")));
-        phdr->pd_lower = offset;
+        pageHeader->pd_lower = offset;
     }
 
     START_CRIT_SECTION();
 
-    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-    phdr->pd_lower += len;
+    memcpy_s(page + pageHeader->pd_lower,
+             pageHeader->pd_upper - pageHeader->pd_lower,
+             buf,
+             length);
+    pageHeader->pd_lower += length;
 
     MarkBufferDirty(buffer);
 
-    if (RelationNeedsWAL(rel)) {
+    if (RelationNeedsWAL(relation)) {
         XLogBeginInsert();
 
-        /*
-         * Since columnar will mostly write whole pages we force the transmission of the
-         * whole image in the buffer
-         */
+        // Since columnar will mostly write whole pages we force the transmission of the whole image in the buffer
         XLogRegisterBuffer(0, buffer, REGBUF_FORCE_IMAGE);
 
         XLogRecPtr recptr = XLogInsert(RM_GENERIC_ID, 0);
@@ -777,24 +790,22 @@ ColumnarMetapageIsNewer(ColumnarMetapage *metapage) {
 }
 
 
-/*
- * ColumnarMetapageCheckVersion - throw an error if accessing old
- * version of metapage.
- */
-static void
-ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage) {
-    if (!ColumnarMetapageIsCurrent(metapage)) {
-        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg(
-                        "attempted to access relation \"%s\", which uses an older columnar format",
-                        RelationGetRelationName(rel)),
-                errdetail(
-                        "Columnar format version %d.%d is required, \"%s\" has version %d.%d.",
-                        COLUMNAR_VERSION_MAJOR, COLUMNAR_VERSION_MINOR,
-                        RelationGetRelationName(rel),
-                        metapage->versionMajor, metapage->versionMinor),
-                errhint(OLD_METAPAGE_VERSION_HINT)));
+// throw an error if accessing old version of columnarMetapage
+static void ColumnarMetapageCheckVersion(Relation relation, ColumnarMetapage *columnarMetapage) {
+    if (ColumnarMetapageIsCurrent(columnarMetapage)) {
+        return;
     }
+
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+            errmsg(
+                    "attempted to access relation \"%s\", which uses an older columnar format",
+                    RelationGetRelationName(relation)),
+            errdetail(
+                    "Columnar format version %d.%d is required, \"%s\" has version %d.%d.",
+                    COLUMNAR_VERSION_MAJOR, COLUMNAR_VERSION_MINOR,
+                    RelationGetRelationName(relation),
+                    columnarMetapage->versionMajor, columnarMetapage->versionMinor),
+            errhint(OLD_METAPAGE_VERSION_HINT)));
 }
 
 

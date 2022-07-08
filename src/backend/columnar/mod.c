@@ -1,5 +1,4 @@
 /*-------------------------------------------------------------------------
- *
  * mod.c
  *
  * This file contains module-level definitions.
@@ -22,14 +21,11 @@
 
 #include "columnar/columnar_tableam.h"
 
-void
-columnar_init(void) {
+void columnar_init(void) {
     columnar_init_gucs();
     columnar_tableam_init();
 }
 
-
-void
-columnar_fini(void) {
+void columnar_fini(void) {
     columnar_tableam_finish();
 }

@@ -58,11 +58,10 @@ typedef struct ColumnarCompressHeader {
  * if compression is done, returns false if compression is not done.
  * outputBuffer is valid only if the function returns true.
  */
-bool
-CompressBuffer(StringInfo inputBuffer,
-               StringInfo outputBuffer,
-               CompressionType compressionType,
-               int compressionLevel) {
+bool CompressBuffer(StringInfo inputBuffer,
+                    StringInfo outputBuffer,
+                    CompressionType compressionType,
+                    int compressionLevel) {
     switch (compressionType) {
 #if HAVE_CITUS_LIBLZ4
         case COMPRESSION_LZ4: {

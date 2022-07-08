@@ -29,8 +29,7 @@
 
 
 /*
- * Logical offsets never fall on the first two physical pages. See
- * comments in columnar_storage.c.
+ * Logical offsets never fall on the first two physical pages. See comments in columnar_storage.c.
  */
 #define ColumnarInvalidLogicalOffset 0
 #define ColumnarFirstLogicalOffset ((BLCKSZ - SizeOfPageHeaderData) * 2)
@@ -46,19 +45,19 @@ extern void ColumnarStorageUpdateCurrent(Relation rel, bool upgrade,
 
 extern uint64 ColumnarStorageGetVersionMajor(Relation rel, bool force);
 extern uint64 ColumnarStorageGetVersionMinor(Relation rel, bool force);
-extern uint64 ColumnarStorageGetStorageId(Relation rel, bool force);
+extern uint64 ColumnarStorageGetStorageId(Relation relation, bool force);
 extern uint64 ColumnarStorageGetReservedStripeId(Relation rel, bool force);
 extern uint64 ColumnarStorageGetReservedRowNumber(Relation rel, bool force);
 extern uint64 ColumnarStorageGetReservedOffset(Relation rel, bool force);
 
-extern uint64 ColumnarStorageReserveData(Relation rel, uint64 amount);
+extern uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen);
 extern uint64 ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows);
-extern uint64 ColumnarStorageReserveStripeId(Relation rel);
+extern uint64 ColumnarStorageReserveStripeId(Relation targetTable);
 
 extern void ColumnarStorageRead(Relation rel, uint64 logicalOffset,
 								char *data, uint32 amount);
-extern void ColumnarStorageWrite(Relation rel, uint64 logicalOffset,
-								 char *data, uint32 amount);
+extern void ColumnarStorageWrite(Relation relation, uint64 logicalOffset,
+                                 char *data, uint32 length);
 extern bool ColumnarStorageTruncate(Relation rel, uint64 newDataReservation);
 
 #endif /* COLUMNAR_STORAGE_H */

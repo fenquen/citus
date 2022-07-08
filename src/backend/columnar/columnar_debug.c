@@ -144,8 +144,7 @@ columnar_storage_info(PG_FUNCTION_ARGS) {
  * MemoryContextTotals adds stats of the given memory context and its
  * subtree to the given counters.
  */
-static void
-MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters) {
+static void MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters) {
     if (context == NULL) {
         return;
     }

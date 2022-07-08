@@ -57,8 +57,8 @@
 
 
 /*
- * Mapping from relfilenode to WriteStateMapEntry. This keeps write state for
- * each relation.
+ * key是relation->rd_node.relNode
+ * Mapping from relfilenode to WriteStateMapEntry. This keeps write state for each relation.
  */
 static HTAB *WriteStateMap = NULL;
 
@@ -66,13 +66,13 @@ static HTAB *WriteStateMap = NULL;
 static MemoryContext WriteStateContext = NULL;
 
 /*
- * Each member of the writeStateStack in WriteStateMapEntry. This means that
+ * Each member of the subXidWriteState in WriteStateMapEntry. This means that
  * we did some inserts in the subtransaction subXid, and the state of those
- * inserts is stored at writeState. Those writes can be flushed or unflushed.
+ * inserts is stored at columnarWriteState. Those writes can be flushed or unflushed.
  */
 typedef struct SubXidWriteState {
     SubTransactionId subXid;
-    ColumnarWriteState *writeState;
+    ColumnarWriteState *columnarWriteState;
 
     struct SubXidWriteState *next;
 } SubXidWriteState;
@@ -95,11 +95,11 @@ typedef struct WriteStateMapEntry {
     /*
      * Stack of SubXidWriteState where first element is top of the stack. When
      * inserts happen, we look at top of the stack. If top of stack belongs to
-     * current subtransaction, we forward writes to its writeState. Otherwise,
+     * current subtransaction, we forward writes to its columnarWriteState. Otherwise,
      * we create a new stack entry for current subtransaction and push it to
      * the stack, and forward writes to that.
      */
-    SubXidWriteState *writeStateStack;
+    SubXidWriteState *subXidWriteState;
 } WriteStateMapEntry;
 
 
@@ -110,94 +110,86 @@ typedef struct WriteStateMapEntry {
  */
 static MemoryContextCallback cleanupCallback;
 
-static void
-CleanupWriteStateMap(void *arg) {
+static void CleanupWriteStateMap(void *arg) {
     WriteStateMap = NULL;
     WriteStateContext = NULL;
 }
 
 
-ColumnarWriteState *
-columnar_init_write_state(Relation relation, TupleDesc tupdesc,
-                          SubTransactionId currentSubXid) {
+ColumnarWriteState *columnar_init_write_state(Relation relation,
+                                              TupleDesc tupleDesc,
+                                              SubTransactionId currentSubXid) {
     bool found;
 
-    /*
-     * If this is the first call in current transaction, allocate the hash
-     * table.
-     */
+    // this is the first call in current transaction,生成hashMap以oid为key
     if (WriteStateMap == NULL) {
-        WriteStateContext =
-                AllocSetContextCreate(
-                        TopTransactionContext,
-                        "Column Store Write State Management Context",
-                        ALLOCSET_DEFAULT_SIZES);
+        WriteStateContext = AllocSetContextCreate(TopTransactionContext,
+                                                  "Column Store Write State Management Context",
+                                                  ALLOCSET_DEFAULT_SIZES);
         HASHCTL info;
-        uint32 hashFlags = (HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
         memset(&info, 0, sizeof(info));
         info.keysize = sizeof(Oid);
         info.hash = oid_hash;
         info.entrysize = sizeof(WriteStateMapEntry);
         info.hcxt = WriteStateContext;
 
+        uint32 hashFlags = (HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+
+        // 生成了hashMap
         WriteStateMap = hash_create("column store write state map",
-                                    64, &info, hashFlags);
+                                    64,
+                                    &info,
+                                    hashFlags);
 
         cleanupCallback.arg = NULL;
         cleanupCallback.func = &CleanupWriteStateMap;
         cleanupCallback.next = NULL;
+
         MemoryContextRegisterResetCallback(WriteStateContext, &cleanupCallback);
     }
 
-    WriteStateMapEntry *hashEntry = hash_search(WriteStateMap, &relation->rd_node.relNode,
-                                                HASH_ENTER, &found);
+    WriteStateMapEntry *writeStateMapEntry = hash_search(WriteStateMap,
+                                                         &relation->rd_node.relNode,
+                                                         HASH_ENTER,
+                                                         &found);
     if (!found) {
-        hashEntry->writeStateStack = NULL;
-        hashEntry->dropped = false;
+        writeStateMapEntry->subXidWriteState = NULL;
+        writeStateMapEntry->dropped = false;
     }
 
-    Assert(!hashEntry->dropped);
+    Assert(!writeStateMapEntry->dropped);
 
-    /*
-     * If top of stack belongs to the current subtransaction, return its
-     * writeState, ...
-     */
-    if (hashEntry->writeStateStack != NULL) {
-        SubXidWriteState *stackHead = hashEntry->writeStateStack;
-
-        if (stackHead->subXid == currentSubXid) {
-            return stackHead->writeState;
+    // If top of stack belongs to the current sub transaction, return its columnarWriteState, ...
+    if (writeStateMapEntry->subXidWriteState != NULL) {
+        if (writeStateMapEntry->subXidWriteState->subXid == currentSubXid) {
+            return writeStateMapEntry->subXidWriteState->columnarWriteState;
         }
     }
 
-    /*
-     * ... otherwise we need to create a new stack entry for the current
-     * subtransaction.
-     */
-    MemoryContext oldContext = MemoryContextSwitchTo(WriteStateContext);
+    // otherwise we need to create a new stack entry for the current sub transaction.
+    MemoryContext oldContext = MemoryContextSwitchTo(WriteStateContext);//----------------切换
 
     ColumnarOptions columnarOptions = {0};
     ReadColumnarOptions(relation->rd_id, &columnarOptions);
 
-    SubXidWriteState *stackEntry = palloc0(sizeof(SubXidWriteState));
-    stackEntry->writeState = ColumnarBeginWrite(relation->rd_node,
-                                                columnarOptions,
-                                                tupdesc);
-    stackEntry->subXid = currentSubXid;
-    stackEntry->next = hashEntry->writeStateStack;
-    hashEntry->writeStateStack = stackEntry;
+    SubXidWriteState *subXidWriteState = palloc0(sizeof(SubXidWriteState));
 
-    MemoryContextSwitchTo(oldContext);
+    subXidWriteState->subXid = currentSubXid;
+    subXidWriteState->columnarWriteState = ColumnarBeginWrite(relation->rd_node,
+                                                              columnarOptions,
+                                                              tupleDesc);
 
-    return stackEntry->writeState;
+    // 顶掉之前的 让之前的成为next
+    subXidWriteState->next = writeStateMapEntry->subXidWriteState;
+    writeStateMapEntry->subXidWriteState = subXidWriteState;
+
+    MemoryContextSwitchTo(oldContext);//----------------切回
+
+    return subXidWriteState->columnarWriteState;
 }
 
-
-/*
- * Flushes pending writes for given relfilenode in the given subtransaction.
- */
-void
-FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid) {
+// Flushes pending writes for given relfilenode in the given subtransaction.
+void FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid) {
     if (WriteStateMap == NULL) {
         return;
     }
@@ -206,10 +198,10 @@ FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid) {
 
     Assert(!entry || !entry->dropped);
 
-    if (entry && entry->writeStateStack != NULL) {
-        SubXidWriteState *stackEntry = entry->writeStateStack;
+    if (entry && entry->subXidWriteState != NULL) {
+        SubXidWriteState *stackEntry = entry->subXidWriteState;
         if (stackEntry->subXid == currentSubXid) {
-            ColumnarFlushPendingWrites(stackEntry->writeState);
+            ColumnarFlushPendingWrites(stackEntry->columnarWriteState);
         }
     }
 }
@@ -222,60 +214,51 @@ FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid) {
  * tables, and either propagates the dropped flag to parent subtransaction or
  * rolls back abort.
  */
-static void
-PopWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentSubXid,
-                        bool commit) {
-    HASH_SEQ_STATUS status;
-    WriteStateMapEntry *entry;
+static void PopWriteStateForAllRels(SubTransactionId currentSubXid,
+                                    SubTransactionId parentSubXid,
+                                    bool commit) {
+    HASH_SEQ_STATUS hashSeqStatus;
+    WriteStateMapEntry *writeStateMapEntry;
 
     if (WriteStateMap == NULL) {
         return;
     }
 
-    hash_seq_init(&status, WriteStateMap);
-    while ((entry = hash_seq_search(&status)) != 0) {
-        if (entry->writeStateStack == NULL) {
+    hash_seq_init(&hashSeqStatus, WriteStateMap);
+
+    while ((writeStateMapEntry = hash_seq_search(&hashSeqStatus)) != 0) {
+        if (writeStateMapEntry->subXidWriteState == NULL) {
             continue;
         }
 
-        /*
-         * If the table has been dropped in current subtransaction, either
-         * commit the drop or roll it back.
-         */
-        if (entry->dropped) {
-            if (entry->dropSubXid == currentSubXid) {
+        // If the table has been dropped in current sub transaction, either commit the drop or roll it back.
+        if (writeStateMapEntry->dropped) {
+            if (writeStateMapEntry->dropSubXid == currentSubXid) {
                 if (commit) {
                     /* elevate drop to the upper subtransaction */
-                    entry->dropSubXid = parentSubXid;
+                    writeStateMapEntry->dropSubXid = parentSubXid;
                 } else {
                     /* abort the drop */
-                    entry->dropped = false;
+                    writeStateMapEntry->dropped = false;
                 }
             }
-        }
-
-            /*
-             * Otherwise, commit or discard pending writes.
-             */
-        else {
-            SubXidWriteState *stackHead = entry->writeStateStack;
-            if (stackHead->subXid == currentSubXid) {
+        } else { // Otherwise, commit or discard pending writes.
+            SubXidWriteState *subXidWriteState = writeStateMapEntry->subXidWriteState;
+            if (subXidWriteState->subXid == currentSubXid) {
                 if (commit) {
-                    ColumnarEndWrite(stackHead->writeState);
+                    ColumnarEndWrite(subXidWriteState->columnarWriteState);
                 }
 
-                entry->writeStateStack = stackHead->next;
+                writeStateMapEntry->subXidWriteState = subXidWriteState->next;
             }
         }
     }
 }
 
 
-/*
- * Called when current subtransaction is committed.
- */
-void
-FlushWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentSubXid) {
+// Called when current subtransaction is committed.
+void FlushWriteStateForAllRels(SubTransactionId currentSubXid,
+                               SubTransactionId parentSubXid) {
     PopWriteStateForAllRels(currentSubXid, parentSubXid, true);
 }
 
@@ -331,12 +314,12 @@ PendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId currentSubXid
 
     WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL);
 
-    if (entry && entry->writeStateStack != NULL) {
-        SubXidWriteState *stackEntry = entry->writeStateStack;
+    if (entry && entry->subXidWriteState != NULL) {
+        SubXidWriteState *stackEntry = entry->subXidWriteState;
 
         while (stackEntry != NULL) {
             if (stackEntry->subXid != currentSubXid &&
-                ContainsPendingWrites(stackEntry->writeState)) {
+                ContainsPendingWrites(stackEntry->columnarWriteState)) {
                 return true;
             }
 

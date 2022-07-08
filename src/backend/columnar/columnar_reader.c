@@ -882,24 +882,27 @@ ColumnarReadChunkGroupsFiltered(ColumnarReadState *state) {
  * CreateEmptyChunkDataArray creates data buffers to keep deserialized exist and
  * value arrays for requested columns in columnMask.
  */
-ChunkData *
-CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount) {
-    uint32 columnIndex = 0;
+ChunkData *CreateEmptyChunkData(uint32 columnCount,
+                                const bool *columnMask,// 数量columnCount相同
+                                uint32 chunkRowCount) {
+
+    uint32 columnIndex;
 
     ChunkData *chunkData = palloc0(sizeof(ChunkData));
+
+    chunkData->columnCount = columnCount;
+    chunkData->rowCount = chunkRowCount;
+
     chunkData->existsArray = palloc0(columnCount * sizeof(bool *));
     chunkData->valueArray = palloc0(columnCount * sizeof(Datum *));
     chunkData->valueBufferArray = palloc0(columnCount * sizeof(StringInfo));
-    chunkData->columnCount = columnCount;
-    chunkData->rowCount = chunkGroupRowCount;
 
-    /* allocate chunk memory for deserialized data */
+    // allocate chunk memory for deserialized data
+    // columnCount 乘以 chunkRowLimit
     for (columnIndex = 0; columnIndex < columnCount; columnIndex++) {
         if (columnMask[columnIndex]) {
-            chunkData->existsArray[columnIndex] = palloc0(chunkGroupRowCount *
-                                                          sizeof(bool));
-            chunkData->valueArray[columnIndex] = palloc0(chunkGroupRowCount *
-                                                         sizeof(Datum));
+            chunkData->existsArray[columnIndex] = palloc0(chunkRowCount * sizeof(bool));
+            chunkData->valueArray[columnIndex] = palloc0(chunkRowCount * sizeof(Datum));
             chunkData->valueBufferArray[columnIndex] = NULL;
         }
     }
@@ -914,15 +917,12 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
  * ColumnChunkData->serializedValueBuffer lives in memory read/write context
  * so it is deallocated automatically when the context is deleted.
  */
-void
-FreeChunkData(ChunkData *chunkData) {
-    uint32 columnIndex = 0;
-
+void FreeChunkData(ChunkData *chunkData) {
     if (chunkData == NULL) {
         return;
     }
 
-    for (columnIndex = 0; columnIndex < chunkData->columnCount; columnIndex++) {
+    for (uint32 columnIndex = 0; columnIndex < chunkData->columnCount; columnIndex++) {
         if (chunkData->existsArray[columnIndex] != NULL) {
             pfree(chunkData->existsArray[columnIndex]);
         }
@@ -988,7 +988,7 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
     for (columnIndex = 0; columnIndex < stripeMetadata->columnCount; columnIndex++) {
         if (projectedColumnMask[columnIndex]) {
             ColumnChunkSkipNode *chunkSkipNode =
-                    selectedChunkSkipList->chunkSkipNodeArray[columnIndex];
+                    selectedChunkSkipList->columnChunkSkipNodeArray[columnIndex];
             Form_pg_attribute attributeForm = TupleDescAttr(tupleDescriptor, columnIndex);
             uint32 chunkCount = selectedChunkSkipList->chunkCount;
 
@@ -1066,7 +1066,7 @@ LoadColumnBuffers(Relation relation, ColumnChunkSkipNode *chunkSkipNodeArray,
     }
 
     ColumnBuffers *columnBuffers = palloc0(sizeof(ColumnBuffers));
-    columnBuffers->chunkBuffersArray = chunkBuffersArray;
+    columnBuffers->columnChunkBuffersArray = chunkBuffersArray;
 
     return columnBuffers;
 }
@@ -1091,9 +1091,9 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
         uint32 columnIndex = column->varattno - 1;
 
         /* if this column's data type doesn't have a comparator, skip it */
-        FmgrInfo *comparisonFunction = GetFunctionInfoOrNull(column->vartype,
-                                                             BTREE_AM_OID,
-                                                             BTORDER_PROC);
+        FmgrInfo *comparisonFunction = GetCompareFunc(column->vartype,
+                                                      BTREE_AM_OID,
+                                                      BTORDER_PROC);
         if (comparisonFunction == NULL) {
             continue;
         }
@@ -1101,7 +1101,7 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
         Node *baseConstraint = BuildBaseConstraint(column);
         for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
             ColumnChunkSkipNode *chunkSkipNodeArray =
-                    stripeSkipList->chunkSkipNodeArray[columnIndex];
+                    stripeSkipList->columnChunkSkipNodeArray[columnIndex];
             ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
 
             /*
@@ -1130,16 +1130,18 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 
 
 /*
- * GetFunctionInfoOrNull first resolves the operator for the given data type,
+ * GetCompareFunc first resolves the operator for the given data type,
  * access method, and support procedure. The function then uses the resolved
  * operator's identifier to fill in a function manager object, and returns
  * this object. This function is based on a similar function from CitusDB's code.
  */
-FmgrInfo *
-GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16 procedureId) {
+FmgrInfo *GetCompareFunc(Oid typeId,
+                         Oid accessMethodId,
+                         int16 procedureId) {
     FmgrInfo *functionInfo = NULL;
 
-    /* get default operator class from pg_opclass for datum type */
+    // get default operator class from pg_opclass for datum type
+    // opclass 在创建index时候也会用到
     Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
     if (operatorClassId == InvalidOid) {
         return NULL;
@@ -1343,7 +1345,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
             continue;
         }
 
-        Assert(stripeSkipList->chunkSkipNodeArray[columnIndex] != NULL);
+        Assert(stripeSkipList->columnChunkSkipNodeArray[columnIndex] != NULL);
 
         selectedChunkSkipNodeArray[columnIndex] = palloc0(selectedChunkCount *
                                                           sizeof(ColumnChunkSkipNode));
@@ -1351,7 +1353,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
         for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
             if (selectedChunkMask[chunkIndex]) {
                 selectedChunkSkipNodeArray[columnIndex][selectedChunkIndex] =
-                        stripeSkipList->chunkSkipNodeArray[columnIndex][chunkIndex];
+                        stripeSkipList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
                 selectedChunkIndex++;
             }
         }
@@ -1367,7 +1369,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
     }
 
     StripeSkipList *selectedChunkSkipList = palloc0(sizeof(StripeSkipList));
-    selectedChunkSkipList->chunkSkipNodeArray = selectedChunkSkipNodeArray;
+    selectedChunkSkipList->columnChunkSkipNodeArray = selectedChunkSkipNodeArray;
     selectedChunkSkipList->chunkCount = selectedChunkCount;
     selectedChunkSkipList->columnCount = stripeSkipList->columnCount;
     selectedChunkSkipList->chunkGroupRowCounts = chunkGroupRowCounts;
@@ -1506,7 +1508,7 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
 
         if (columnBuffers != NULL) {
             ColumnChunkBuffers *chunkBuffers =
-                    columnBuffers->chunkBuffersArray[chunkIndex];
+                    columnBuffers->columnChunkBuffersArray[chunkIndex];
 
             /* decompress and deserialize current chunk's data */
             StringInfo valueBuffer =
