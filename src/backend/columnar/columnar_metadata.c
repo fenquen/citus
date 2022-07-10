@@ -67,17 +67,12 @@ typedef struct {
     ResultRelInfo *resultRelInfo;
 } ModifyState;
 
-/* RowNumberLookupMode to be used in StripeMetadataLookupRowNumber */
+/* RowNumberLookupMode to be used in StripeMetadataLookupByRowNumber */
 typedef enum RowNumberLookupMode {
-    /*
-     * Find the stripe whose firstRowNumber is less than or equal to given
-     * input rowNumber.
-     */
+    // Find the stripe whose firstRowNumber is less than or equal to given input rowNumber.
     FIND_LESS_OR_EQUAL,
 
-    /*
-     * Find the stripe whose firstRowNumber is greater than input rowNumber.
-     */
+    // Find the stripe whose firstRowNumber is greater than input rowNumber.
     FIND_GREATER
 } RowNumberLookupMode;
 
@@ -148,9 +143,9 @@ static Datum ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm);
 
 static bool WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite);
 
-static StripeMetadata *StripeMetadataLookupRowNumber(Relation relation, uint64 rowNumber,
-                                                     Snapshot snapshot,
-                                                     RowNumberLookupMode lookupMode);
+static StripeMetadata *StripeMetadataLookupByRowNumber(Relation relation, uint64 rowNumber,
+                                                       Snapshot snapshot,
+                                                       RowNumberLookupMode lookupMode);
 
 static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
 
@@ -692,15 +687,17 @@ ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe, TupleDesc tupleDescri
     return chunkList;
 }
 
-
 /*
- * FindStripeByRowNumber returns StripeMetadata for the stripe whose
- * firstRowNumber is greater than given rowNumber. If no such stripe
- * exists, then returns NULL.
+ * returns StripeMetadata for the stripe whose firstRowNumber is greater than given rowNumber.
+ * If no such stripe exists, then returns NULL.
  */
-StripeMetadata *
-FindNextStripeByRowNumber(Relation relation, uint64 rowNumber, Snapshot snapshot) {
-    return StripeMetadataLookupRowNumber(relation, rowNumber, snapshot, FIND_GREATER);
+StripeMetadata *FindNextStripeByRowNumber(Relation relation,
+                                          uint64 rowNumber,
+                                          Snapshot snapshot) {
+    return StripeMetadataLookupByRowNumber(relation,
+                                           rowNumber,
+                                           snapshot,
+                                           FIND_GREATER);
 }
 
 
@@ -741,23 +738,24 @@ FindStripeByRowNumber(Relation relation, uint64 rowNumber, Snapshot snapshot) {
 StripeMetadata *
 FindStripeWithMatchingFirstRowNumber(Relation relation, uint64 rowNumber,
                                      Snapshot snapshot) {
-    return StripeMetadataLookupRowNumber(relation, rowNumber, snapshot,
-                                         FIND_LESS_OR_EQUAL);
+    return StripeMetadataLookupByRowNumber(relation, rowNumber, snapshot,
+                                           FIND_LESS_OR_EQUAL);
 }
 
 
 /*
  * StripeWriteState returns write state of given stripe.
  */
-StripeWriteStateEnum
-StripeWriteState(StripeMetadata *stripeMetadata) {
+StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata) {
     if (stripeMetadata->aborted) {
         return STRIPE_WRITE_ABORTED;
-    } else if (stripeMetadata->rowCount > 0) {
-        return STRIPE_WRITE_FLUSHED;
-    } else {
-        return STRIPE_WRITE_IN_PROGRESS;
     }
+
+    if (stripeMetadata->rowCount > 0) {
+        return STRIPE_WRITE_FLUSHED;
+    }
+
+    return STRIPE_WRITE_IN_PROGRESS;
 }
 
 
@@ -770,62 +768,68 @@ StripeGetHighestRowNumber(StripeMetadata *stripeMetadata) {
     return stripeMetadata->firstRowNumber + stripeMetadata->rowCount - 1;
 }
 
-
 /*
- * StripeMetadataLookupRowNumber returns StripeMetadata for the stripe whose
+ * StripeMetadataLookupByRowNumber returns StripeMetadata for the stripe whose
  * firstRowNumber is less than or equal to (FIND_LESS_OR_EQUAL), or is
  * greater than (FIND_GREATER) given rowNumber by doing backward index
  * scan on stripe_first_row_number_idx.
  * If no such stripe exists, then returns NULL.
  */
-static StripeMetadata *
-StripeMetadataLookupRowNumber(Relation relation, uint64 rowNumber, Snapshot snapshot,
-                              RowNumberLookupMode lookupMode) {
+static StripeMetadata *StripeMetadataLookupByRowNumber(Relation relation,
+                                                       uint64 rowNumber,
+                                                       Snapshot snapshot,
+                                                       RowNumberLookupMode lookupMode) {
     Assert(lookupMode == FIND_LESS_OR_EQUAL || lookupMode == FIND_GREATER);
 
-    StripeMetadata *foundStripeMetadata = NULL;
+    StripeMetadata *result = NULL;
 
     uint64 storageId = ColumnarStorageGetStorageId(relation, false);
+
     ScanKeyData scanKey[2];
-    ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
-                BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(storageId));
+    ScanKeyInit(&scanKey[0],
+                Anum_columnar_stripe_storageid,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                Int32GetDatum(storageId));
 
     StrategyNumber strategyNumber = InvalidStrategy;
     RegProcedure procedure = InvalidOid;
     if (lookupMode == FIND_LESS_OR_EQUAL) {
         strategyNumber = BTLessEqualStrategyNumber;
         procedure = F_INT8LE;
-    } else if (lookupMode == FIND_GREATER) {
+    } else {
         strategyNumber = BTGreaterStrategyNumber;
         procedure = F_INT8GT;
     }
-    ScanKeyInit(&scanKey[1], Anum_columnar_stripe_first_row_number,
-                strategyNumber, procedure, UInt64GetDatum(rowNumber));
+    ScanKeyInit(&scanKey[1],
+                Anum_columnar_stripe_first_row_number,
+                strategyNumber,
+                procedure,
+                UInt64GetDatum(rowNumber));
 
 
-    Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
-    Relation index = index_open(ColumnarStripeFirstRowNumberIndexRelationId(),
-                                AccessShareLock);
-    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
-                                                            snapshot, 2,
+    // columnar.stripe表
+    Relation columnarStripeTable = table_open(ColumnarStripeRelationId(), AccessShareLock);
+    Relation index = index_open(ColumnarStripeFirstRowNumberIndexRelationId(),AccessShareLock);
+    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripeTable,
+                                                            index,
+                                                            snapshot,
+                                                            2,
                                                             scanKey);
 
-    ScanDirection scanDirection = NoMovementScanDirection;
-    if (lookupMode == FIND_LESS_OR_EQUAL) {
-        scanDirection = BackwardScanDirection;
-    } else if (lookupMode == FIND_GREATER) {
-        scanDirection = ForwardScanDirection;
-    }
+    ScanDirection scanDirection =
+            lookupMode == FIND_LESS_OR_EQUAL ? BackwardScanDirection : ForwardScanDirection;
+
     HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, scanDirection);
     if (HeapTupleIsValid(heapTuple)) {
-        foundStripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+        result = BuildStripeMetadata(columnarStripeTable, heapTuple);
     }
 
     systable_endscan_ordered(scanDescriptor);
     index_close(index, AccessShareLock);
-    table_close(columnarStripes, AccessShareLock);
+    table_close(columnarStripeTable, AccessShareLock);
 
-    return foundStripeMetadata;
+    return result;
 }
 
 
@@ -1060,10 +1064,9 @@ GetHighestUsedAddress(RelFileNode relfilenode) {
  * GetHighestUsedAddressAndId returns the highest used address and id for
  * the given relfilenode across all active and inactive transactions.
  */
-static void
-GetHighestUsedAddressAndId(uint64 storageId,
-                           uint64 *highestUsedAddress,
-                           uint64 *highestUsedId) {
+static void GetHighestUsedAddressAndId(uint64 storageId,
+                                       uint64 *highestUsedAddress,
+                                       uint64 *highestUsedId) {
     ListCell *stripeMetadataCell = NULL;
 
     SnapshotData SnapshotDirty;
@@ -1084,7 +1087,6 @@ GetHighestUsedAddressAndId(uint64 storageId,
     }
 }
 
-
 /*
  * ReserveEmptyStripe reserves an empty stripe for given relation
  * and inserts it into columnar.stripe. It is guaranteed that concurrent
@@ -1093,15 +1095,16 @@ GetHighestUsedAddressAndId(uint64 storageId,
 EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable,
                                            uint64 columnCount,
                                            uint64 chunkGroupRowLimit,
-                                           uint64 stripeRowCount) {
+                                           uint64 stripeRowLimit) {
     EmptyStripeReservation *emptyStripeReservation = palloc0(sizeof(EmptyStripeReservation));
 
     uint64 storageId = ColumnarStorageGetStorageId(targetTable, false);
 
     emptyStripeReservation->stripeId = ColumnarStorageReserveStripeId(targetTable);
-    emptyStripeReservation->stripeFirstRowNumber = ColumnarStorageReserveRowNumber(targetTable, stripeRowCount);
+    emptyStripeReservation->stripeFirstRowNumber = ColumnarStorageReserveRowNumber(targetTable, stripeRowLimit);
 
     /*
+     * 向 columnar.stripe表 insert
      * XXX: Instead of inserting a dummy entry to columnar.stripe and
      * updating it when flushing the stripe, we could have a hash table
      * in shared memory for the bookkeeping of ongoing writes.
@@ -1123,10 +1126,10 @@ EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable,
  */
 StripeMetadata *CompleteStripeReservation(Relation targetTable,
                                           uint64 stripeId,
-                                          uint64 byteLen,
-                                          uint64 rowCount,
+                                          uint64 stripeSize,
+                                          uint64 stripeRowCount,
                                           uint64 chunkCount) {
-    uint64 resLogicalStart = ColumnarStorageReserveData(targetTable, byteLen);
+    uint64 resLogicalStart = ColumnarStorageReserveData(targetTable, stripeSize);
     uint64 storageId = ColumnarStorageGetStorageId(targetTable, false);
 
     // 以下是update内部管理用的表columnar.stripe,使用代码的套路进行update
@@ -1139,8 +1142,8 @@ StripeMetadata *CompleteStripeReservation(Relation targetTable,
 
     Datum newValues[Natts_columnar_stripe] = {0};
     newValues[Anum_columnar_stripe_file_offset - 1] = Int64GetDatum(resLogicalStart);
-    newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(byteLen);
-    newValues[Anum_columnar_stripe_row_count - 1] = UInt64GetDatum(rowCount);
+    newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(stripeSize);
+    newValues[Anum_columnar_stripe_row_count - 1] = UInt64GetDatum(stripeRowCount);
     newValues[Anum_columnar_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
 
     return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
@@ -1216,8 +1219,7 @@ static StripeMetadata *UpdateStripeMetadataRow(uint64 storageId,
     HeapTuple newTuple = oldTuple;
 
     /*
-     * Must not pass modifiedTuple, because BuildStripeMetadata expects a real
-     * heap tuple with MVCC fields.
+     * Must not pass modifiedTuple, because BuildStripeMetadata expects a real heap tuple with MVCC fields.
      */
     StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripeTable,
                                                                  newTuple);
@@ -1603,12 +1605,11 @@ ColumnarStripePKeyIndexRelationId(void) {
 
 
 /*
- * ColumnarStripeFirstRowNumberIndexRelationId returns relation id of
- * columnar.stripe_first_row_number_idx.
+ * columnar.stripe表的唯1索引
+ * constraint stripe_first_row_number_idx unique (storage_id, first_row_number)
  * TODO: should we cache this similar to citus?
  */
-static Oid
-ColumnarStripeFirstRowNumberIndexRelationId(void) {
+static Oid ColumnarStripeFirstRowNumberIndexRelationId(void) {
     return get_relname_relid("stripe_first_row_number_idx", ColumnarNamespaceId());
 }
 

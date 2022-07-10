@@ -68,7 +68,7 @@ typedef struct ColumnarTableDDLContext {
     ColumnarOptions options;
 } ColumnarTableDDLContext;
 
-/* contains statistics for a ChunkData */
+// contains statistics for a ChunkData ,几乎对应了 columnar.chunk表
 typedef struct ColumnChunkSkipNode {
     /* statistics about values of a column chunk */
     bool hasMinMax;
@@ -81,10 +81,10 @@ typedef struct ColumnChunkSkipNode {
      * These enable us to skip reading suppressed row chunks, and start reading
      * a chunk without reading previous chunks.
      */
+    uint64 existsChunkOffset; // 在隶属的stripe中的byte偏移
+    uint64 existsLength;
     uint64 valueChunkOffset;
     uint64 valueLength;
-    uint64 existsChunkOffset;
-    uint64 existsLength;
 
     /*
      * This is used for
@@ -99,6 +99,8 @@ typedef struct ColumnChunkSkipNode {
 
 
 /*
+ * 对应 columnCount * maxChunkCount columnar.chunk表的信息
+ *
  * StripeSkipList can be used for skipping row chunks. It contains a column chunk
  * skip node for each chunk of each column. columnChunkSkipNodeArray[column][chunk]
  * is the entry for the specified column chunk.
@@ -131,7 +133,7 @@ typedef struct ChunkData {
 
     // 数量和columnCount相同,用来临时保存的
     // valueBuffer keeps actual data for type-by-reference datums from valueArray
-    StringInfo *valueBufferArray;
+    StringInfo *columnDataArr;
 } ChunkData;
 
 
@@ -174,16 +176,12 @@ typedef enum StripeWriteStateEnum {
     /* stripe write is flushed to disk, so it's readable */
     STRIPE_WRITE_FLUSHED,
 
-    /*
-     * Writer transaction did abort either before inserting into
-     * columnar.stripe or after.
-     */
+    // Writer transaction did abort either before inserting into columnar.stripe or after.
     STRIPE_WRITE_ABORTED,
 
     /*
      * Writer transaction is still in-progress. Note that it is not certain
-     * if it is being written by current backend's current transaction or
-     * another backend.
+     * if it is being written by current backend's current transaction or another backend.
      */
     STRIPE_WRITE_IN_PROGRESS
 } StripeWriteStateEnum;
@@ -227,21 +225,21 @@ extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *columnarWr
 
 /* functions applicable for both sequential and random access */
 extern ColumnarReadState *ColumnarBeginRead(Relation relation,
-                                            TupleDesc tupleDescriptor,
-                                            List *projectedColumnList,
+                                            TupleDesc tupleDesc,
+                                            List *usedColNaturalPosList,
                                             List *qualConditions,
                                             MemoryContext scanContext,
                                             Snapshot snaphot,
                                             bool randomAccess);
 
-extern void ColumnarReadFlushPendingWrites(ColumnarReadState *readState);
+extern void ColumnarReadFlushPendingWrites(ColumnarReadState *columnarReadState);
 
 extern void ColumnarEndRead(ColumnarReadState *state);
 
 extern void ColumnarResetRead(ColumnarReadState *readState);
 
 /* functions only applicable for sequential access */
-extern bool ColumnarReadNextRow(ColumnarReadState *state, Datum *columnValues,
+extern bool ColumnarReadNextRow(ColumnarReadState *columnarReadState, Datum *columnValues,
                                 bool *columnNulls, uint64 *rowNumber);
 
 extern int64 ColumnarReadChunkGroupsFiltered(ColumnarReadState *state);
@@ -290,10 +288,10 @@ extern uint64 GetHighestUsedAddress(RelFileNode relfilenode);
 
 extern EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable, uint64 columnCount,
                                                   uint64 chunkGroupRowLimit,
-                                                  uint64 stripeRowCount);
+                                                  uint64 stripeRowLimit);
 
 extern StripeMetadata *CompleteStripeReservation(Relation targetTable, uint64 stripeId,
-                                                 uint64 byteLen, uint64 rowCount,
+                                                 uint64 stripeSize, uint64 stripeRowCount,
                                                  uint64 chunkCount);
 
 extern void SaveStripeSkipList(RelFileNode relFileNode, uint64 stripeId,

@@ -15,7 +15,7 @@
 // 几乎是 columnar.strip表对应的model
 // information about a stripe which is stored in the table "columnar.stripe".
 typedef struct StripeMetadata {
-    uint64 fileOffset;
+    uint64 fileOffset; // 该stripe在整个表的存储中的偏移
     uint64 dataLength;
     uint32 columnCount;
     uint32 chunkCount;

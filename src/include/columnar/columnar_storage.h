@@ -51,7 +51,7 @@ extern uint64 ColumnarStorageGetReservedRowNumber(Relation rel, bool force);
 extern uint64 ColumnarStorageGetReservedOffset(Relation rel, bool force);
 
 extern uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen);
-extern uint64 ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows);
+extern uint64 ColumnarStorageReserveRowNumber(Relation relation, uint64 stripeRowLimit);
 extern uint64 ColumnarStorageReserveStripeId(Relation targetTable);
 
 extern void ColumnarStorageRead(Relation rel, uint64 logicalOffset,

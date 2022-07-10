@@ -40,11 +40,11 @@ struct ColumnarWriteState {
 
     MemoryContext perTupleContext;
     MemoryContext stripeWriteContext;
-    StripeBuffers *stripeBuffers;
+    StripeBuffers *stripeBuffers; // stripe维度上的数据临时容器
     StripeSkipList *stripeSkipList;
     EmptyStripeReservation *emptyStripeReservation;
     ColumnarOptions options;
-    ChunkData *chunkData;
+    ChunkData *chunkData; // chunk维度上的公交 数据的临时容器
 
     List *chunkGroupRowCounts; // 记录各个chunk的row用量
 
@@ -152,7 +152,7 @@ ColumnarWriteState *ColumnarBeginWrite(RelFileNode relFileNode,
 }
 
 
-/*
+/**
  * ColumnarWriteRow adds a row to the columnar table. If the stripe is not initialized,
  * we create structures to hold stripe data and skip list. Then, we serialize and
  * append data to serialized value buffer for each of the columns and update
@@ -160,7 +160,10 @@ ColumnarWriteState *ColumnarBeginWrite(RelFileNode relFileNode,
  * rowChunkCount insertion. Then, if row count exceeds stripeMaxRowCount, we flush
  * the stripe, and add its metadata to the table footer.
  *
- * Returns the "row number" assigned to written row.
+ * @param columnarWriteState
+ * @param rowData
+ * @param columnNulls tupleTableSlot->tts_isnull
+ * @return the "row number" assigned to written row
  */
 uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
                         Datum *rowData,
@@ -207,7 +210,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
 
         // serializedValueBuffer lives in stripe write memory context, need be initialized when the stripe is created
         for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-            chunkData->valueBufferArray[columnIndex] = makeStringInfo();
+            chunkData->columnDataArr[columnIndex] = makeStringInfo();
         }
     }
 
@@ -233,7 +236,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
             Oid columnCollation = attributeForm->attcollation;
 
             // 该行当前列的data落到当前column对应的valueBufferArray
-            SerializeSingleDatum(chunkData->valueBufferArray[columnIndex],
+            SerializeSingleDatum(chunkData->columnDataArr[columnIndex],
                                  rowData[columnIndex],
                                  columnTypeByValue,
                                  columnTypeLength,
@@ -253,7 +256,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
 
     stripeSkipList->chunkCount = chunkIndex + 1;
 
-    // 到了chunk的最后1行 算是把chunk写满
+    // 到了chunk容量临界点 rotate 到stripeBuffer对应点位
     if (chunkRowIndex == chunkRowLimit - 1) {
         SerializeChunkData(columnarWriteState, chunkIndex, chunkRowLimit);
     }
@@ -263,7 +266,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
 
     stripeBuffers->rowCount++;
 
-    // 到了stripe临界点
+    // 到了stripe容量临界点
     if (stripeBuffers->rowCount >= columnarOptions->stripeRowLimit) {
         ColumnarFlushPendingWrites(columnarWriteState);
     }
@@ -272,7 +275,6 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
 
     return writtenRowNumber;
 }
-
 
 // ColumnarEndWrite finishes a columnar data load operation. If we have an unflushed stripe, we flush it.
 void ColumnarEndWrite(ColumnarWriteState *columnarWriteState) {
@@ -381,21 +383,20 @@ static StripeSkipList *CreateEmptyStripeSkipList(uint32 stripeMaxRowCount,
  * Finally, the function flushes the skip list, data, and footer buffers to the file.
  */
 static void FlushStripe(ColumnarWriteState *columnarWriteState) {
-    StripeBuffers *stripeBuffers = columnarWriteState->stripeBuffers;
-    StripeSkipList *stripeSkipList = columnarWriteState->stripeSkipList;
+    //StripeBuffers *stripeBuffers = columnarWriteState->stripeBuffers;
+    //StripeSkipList *stripeSkipList = columnarWriteState->stripeSkipList;
 
     uint32 columnCount = columnarWriteState->tupleDesc->natts;
 
-    uint32 chunkCount = stripeSkipList->chunkCount;
-    uint32 chunkRowCount = columnarWriteState->options.chunkRowLimit;
+    uint32 chunkCount = columnarWriteState->stripeSkipList->chunkCount;
 
-    uint32 lastChunkIndex = stripeBuffers->rowCount / chunkRowCount;
-    uint32 lastChunkUsedRowCount = stripeBuffers->rowCount % chunkRowCount;
+    uint32 lastChunkIndex =
+            columnarWriteState->stripeBuffers->rowCount / columnarWriteState->options.chunkRowLimit;
+    uint32 lastChunkUsedRowCount =
+            columnarWriteState->stripeBuffers->rowCount % columnarWriteState->options.chunkRowLimit;
 
-    uint64 stripeSize = 0;
-    uint64 stripeRowCount = stripeBuffers->rowCount;
 
-    elog(DEBUG1, "Flushing Stripe of size %d", stripeBuffers->rowCount);
+    elog(DEBUG1, "Flushing Stripe of size %d", columnarWriteState->stripeBuffers->rowCount);
 
     Oid targetTableOid = RelidByRelfilenode(columnarWriteState->relfilenode.spcNode,
                                             columnarWriteState->relfilenode.relNode);
@@ -409,17 +410,27 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
                            lastChunkUsedRowCount);
     }
 
-    /* update buffer sizes in stripe skip list */
+    // update buffer sizes in stripeSkipList
+    uint64 stripeSize = 0;
     for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
         // column上的 chunkCount个 ColumnChunkSkipNode
-        ColumnChunkSkipNode *chunkSkipNodeArray = stripeSkipList->columnChunkSkipNodeArray[columnIndex];
-        ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
+        // ColumnChunkSkipNode *chunkSkipNodeArray = columnarWriteState->stripeSkipList->columnChunkSkipNodeArray[columnIndex];
+
+        //ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
 
         // exist体系
         for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
             // 精确到了 [column][chunk]
-            ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
-            ColumnChunkSkipNode *columnChunkSkipNode = &chunkSkipNodeArray[chunkIndex];
+            ColumnChunkBuffers *columnChunkBuffers =
+                    columnarWriteState->
+                            stripeBuffers->
+                            columnBuffersArray[columnIndex]->
+                            columnChunkBuffersArray[chunkIndex];
+
+            ColumnChunkSkipNode *columnChunkSkipNode =
+                    &columnarWriteState->
+                            stripeSkipList->
+                            columnChunkSkipNodeArray[columnIndex][chunkIndex];
 
             columnChunkSkipNode->existsChunkOffset = stripeSize;
             columnChunkSkipNode->existsLength = columnChunkBuffers->existsBuffer->len;
@@ -430,8 +441,16 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         // value体系
         for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
             // 精确到了 [column][chunk]
-            ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
-            ColumnChunkSkipNode *columnChunkSkipNode = &chunkSkipNodeArray[chunkIndex];
+            ColumnChunkBuffers *columnChunkBuffers =
+                    columnarWriteState->
+                            stripeBuffers->
+                            columnBuffersArray[columnIndex]->
+                            columnChunkBuffersArray[chunkIndex];
+
+            ColumnChunkSkipNode *columnChunkSkipNode =
+                    &columnarWriteState->
+                            stripeSkipList->
+                            columnChunkSkipNodeArray[columnIndex][chunkIndex];
 
             columnChunkSkipNode->valueChunkOffset = stripeSize;
             columnChunkSkipNode->valueLength = columnChunkBuffers->valueBuffer->len;
@@ -446,9 +465,10 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
     StripeMetadata *stripeMetadata = CompleteStripeReservation(targetTable,
                                                                columnarWriteState->emptyStripeReservation->stripeId,
                                                                stripeSize,
-                                                               stripeRowCount,
+                                                               columnarWriteState->stripeBuffers->rowCount,
                                                                chunkCount);
 
+    // 该stripe在整个表的存储中的偏移
     uint64 currentFileOffset = stripeMetadata->fileOffset;
 
     /*
@@ -462,25 +482,33 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
      */
     //  遍历column遍历chunk flush the data buffers
     for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-        ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
+        // ColumnBuffers *columnBuffers = columnarWriteState->stripeBuffers->columnBuffersArray[columnIndex];
 
         // exists体系
-        for (uint32 chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
-            ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
-            StringInfo existsBuffer = columnChunkBuffers->existsBuffer;
+        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+            ColumnChunkBuffers *columnChunkBuffers =
+                    columnarWriteState->
+                            stripeBuffers->
+                            columnBuffersArray[columnIndex]->
+                            columnChunkBuffersArray[chunkIndex];
 
             ColumnarStorageWrite(targetTable,
                                  currentFileOffset,
-                                 existsBuffer->data,
-                                 existsBuffer->len);
+                                 columnChunkBuffers->existsBuffer->data,
+                                 columnChunkBuffers->existsBuffer->len);
 
-            currentFileOffset += existsBuffer->len;
+            currentFileOffset += columnChunkBuffers->existsBuffer->len;
         }
 
         // value体系
-        for (uint32 chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
-            ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
-            StringInfo valueBuffer = columnChunkBuffers->valueBuffer;
+        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+
+            StringInfo valueBuffer =
+                    columnarWriteState->
+                            stripeBuffers->
+                            columnBuffersArray[columnIndex]->
+                            columnChunkBuffersArray[chunkIndex]->
+                            valueBuffer;
 
             ColumnarStorageWrite(targetTable,
                                  currentFileOffset,
@@ -499,7 +527,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
     // 写入columnar.chunk
     SaveStripeSkipList(columnarWriteState->relfilenode,
                        stripeMetadata->id,
-                       stripeSkipList,
+                       columnarWriteState->stripeSkipList,
                        columnarWriteState->tupleDesc);
 
     columnarWriteState->chunkGroupRowCounts = NIL;
@@ -576,15 +604,13 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
                                uint32 chunkIndex,
                                uint32 chunkUsedRowCount) {
 
-    StripeBuffers *stripeBuffers = columnarWriteState->stripeBuffers;
-
     // chunkData是总的 columnarWriteState维度
     ChunkData *chunkData = columnarWriteState->chunkData;
 
     CompressionType compressionType = columnarWriteState->options.compressionType;
     int compressionLevel = columnarWriteState->options.compressionLevel;
 
-    const uint32 columnCount = stripeBuffers->columnCount;
+    const uint32 columnCount = columnarWriteState->stripeBuffers->columnCount;
     StringInfo compressionBuffer = columnarWriteState->compressionBuffer;
 
     columnarWriteState->chunkGroupRowCounts =
@@ -592,8 +618,11 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
 
     /* serialize exist values, data values are already serialized */
     for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-        ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
-        ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
+        ColumnChunkBuffers *columnChunkBuffers =
+                columnarWriteState->
+                        stripeBuffers->
+                        columnBuffersArray[columnIndex]->
+                        columnChunkBuffersArray[chunkIndex];
 
         columnChunkBuffers->existsBuffer =
                 SerializeBoolArray(chunkData->existsArray[columnIndex], chunkUsedRowCount);
@@ -604,36 +633,36 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
      * then keep it as uncompressed, store compression information.
      */
     for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) { // 定位到某个column下某chunk
-        ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
-        ColumnChunkBuffers *columnChunkBuffers = columnBuffers->columnChunkBuffersArray[chunkIndex];
+        ColumnChunkBuffers *columnChunkBuffers =
+                columnarWriteState->
+                        stripeBuffers->
+                        columnBuffersArray[columnIndex]->
+                        columnChunkBuffersArray[chunkIndex];
 
         CompressionType actualCompressionType = COMPRESSION_NONE;
 
-        StringInfo serializedValueBuffer = chunkData->valueBufferArray[columnIndex];
+        StringInfo columnData = chunkData->columnDataArr[columnIndex];
 
         Assert(compressionType >= 0 && compressionType < COMPRESSION_COUNT);
 
-        columnChunkBuffers->decompressedValueSize = chunkData->valueBufferArray[columnIndex]->len;
+        columnChunkBuffers->decompressedValueSize = chunkData->columnDataArr[columnIndex]->len;
 
-        /*
-         * if serializedValueBuffer is be compressed, update serializedValueBuffer
-         * with compressed data and store compression type.
-         */
-        bool compressed = CompressBuffer(serializedValueBuffer,
+        // if columnData need compressed, update columnData with compressed data and store compression type.
+        bool compressed = CompressBuffer(columnData,
                                          compressionBuffer,
                                          compressionType,
                                          compressionLevel);
         if (compressed) {
-            serializedValueBuffer = compressionBuffer;
+            columnData = compressionBuffer;
             actualCompressionType = compressionType;
         }
 
-        /* store (compressed) value buffer */
+        // store (compressed) value buffer
         columnChunkBuffers->valueCompressionType = actualCompressionType;
-        columnChunkBuffers->valueBuffer = CopyStringInfo(serializedValueBuffer);
+        columnChunkBuffers->valueBuffer = CopyStringInfo(columnData);
 
-        /* valueBuffer needs to be reset for next chunk's data */
-        resetStringInfo(chunkData->valueBufferArray[columnIndex]);
+        // valueBuffer needs to be reset for next chunk's data
+        resetStringInfo(chunkData->columnDataArr[columnIndex]);
     }
 }
 

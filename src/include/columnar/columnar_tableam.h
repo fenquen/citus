@@ -54,7 +54,7 @@ extern void columnar_tableam_finish(void);
 
 extern TableScanDesc columnar_beginscan_extended(Relation relation, Snapshot snapshot,
 												 int nkeys, ScanKey key,
-												 ParallelTableScanDesc parallel_scan,
+												 ParallelTableScanDesc parallelTableScanDesc,
 												 uint32 flags, Bitmapset *attr_needed,
 												 List *scanQual);
 extern int64 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);

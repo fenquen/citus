@@ -76,11 +76,11 @@
  * getnextslot(), rescan(), and endscan() calls.
  */
 typedef struct ColumnarScanDescData {
-    TableScanDescData cs_base;
-    ColumnarReadState *cs_readState;
+    TableScanDescData tableScanDesc;
+    ColumnarReadState *columnarReadState;
 
     /*
-     * We initialize cs_readState lazily in the first getnextslot() call. We
+     * We initialize columnarReadState lazily in the first getnextslot() call. We
      * need the following for initialization. We save them in beginscan().
      */
     MemoryContext scanContext;
@@ -98,7 +98,7 @@ typedef struct IndexFetchColumnarData {
     ColumnarReadState *cs_readState;
 
     /*
-     * We initialize cs_readState lazily in the first columnar_index_fetch_tuple
+     * We initialize columnarReadState lazily in the first columnar_index_fetch_tuple
      * call. However, we want to do memory allocations in a sub MemoryContext of
      * columnar_index_fetch_begin. For this reason, we store scanContext in
      * columnar_index_fetch_begin.
@@ -135,7 +135,7 @@ static void ColumnarProcessUtility(PlannedStmt *pstmt,
 static bool ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode,
                                                int timeout, int retryInterval);
 
-static List *NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed);
+static List *NeededColumnsList(TupleDesc tupleDesc, Bitmapset *attr_needed);
 
 static void LogRelationStats(Relation rel, int elevel);
 
@@ -169,7 +169,8 @@ static double ColumnarReadRowsIntoIndex(TableScanDesc scan,
                                         void *indexCallbackState,
                                         EState *estate, ExprState *predicate);
 
-static void ColumnarReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
+static void ColumnarReadMissingRowsIntoIndex(TableScanDesc scan,
+                                             Relation indexRelation,
                                              IndexInfo *indexInfo, EState *estate,
                                              ExprState *predicate,
                                              ValidateIndexState *state);
@@ -209,28 +210,30 @@ columnar_beginscan(Relation relation, Snapshot snapshot,
 }
 
 
-TableScanDesc
-columnar_beginscan_extended(Relation relation, Snapshot snapshot,
-                            int nkeys, ScanKey key,
-                            ParallelTableScanDesc parallel_scan,
-                            uint32 flags, Bitmapset *attr_needed, List *scanQual) {
-    Oid relfilenode = relation->rd_node.relNode;
-
+// 生成的是 ColumnarScanDesc
+TableScanDesc columnar_beginscan_extended(Relation relation,
+                                          Snapshot snapshot,
+                                          int nkeys,
+                                          ScanKey key,
+                                          ParallelTableScanDesc parallelTableScanDesc,
+                                          uint32 flags,
+                                          Bitmapset *attr_needed,
+                                          List *scanQual) {
     /*
-     * A memory context to use for scan-wide data, including the lazily
+     * A memory context to use for columnarScanDesc-wide data, including the lazily
      * initialized read state. We assume that beginscan is called in a
-     * context that will last until end of scan.
+     * context that will last until end of columnarScanDesc.
      */
     MemoryContext scanContext = CreateColumnarScanMemoryContext();
     MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-    ColumnarScanDesc scan = palloc0(sizeof(ColumnarScanDescData));
-    scan->cs_base.rs_rd = relation;
-    scan->cs_base.rs_snapshot = snapshot;
-    scan->cs_base.rs_nkeys = nkeys;
-    scan->cs_base.rs_key = key;
-    scan->cs_base.rs_flags = flags;
-    scan->cs_base.rs_parallel = parallel_scan;
+    ColumnarScanDesc columnarScanDesc = palloc0(sizeof(ColumnarScanDescData));
+    columnarScanDesc->tableScanDesc.rs_rd = relation;
+    columnarScanDesc->tableScanDesc.rs_snapshot = snapshot;
+    columnarScanDesc->tableScanDesc.rs_nkeys = nkeys;
+    columnarScanDesc->tableScanDesc.rs_key = key;
+    columnarScanDesc->tableScanDesc.rs_flags = flags;
+    columnarScanDesc->tableScanDesc.rs_parallel = parallelTableScanDesc;
 
     /*
      * We will initialize this lazily in first tuple, where we have the actual
@@ -239,111 +242,109 @@ columnar_beginscan_extended(Relation relation, Snapshot snapshot,
      * the storage which we are reading, so we need to use the tuple descriptor
      * of "slot" in first read.
      */
-    scan->cs_readState = NULL;
-    scan->attr_needed = bms_copy(attr_needed);
-    scan->scanQual = copyObject(scanQual);
-    scan->scanContext = scanContext;
+    columnarScanDesc->columnarReadState = NULL;
+    columnarScanDesc->attr_needed = bms_copy(attr_needed);
+    columnarScanDesc->scanQual = copyObject(scanQual);
+    columnarScanDesc->scanContext = scanContext;
 
-    if (PendingWritesInUpperTransactions(relfilenode, GetCurrentSubTransactionId())) {
-        elog(ERROR,
-             "cannot read from table when there is unflushed data in upper transactions");
+    if (PendingWritesInUpperTransactions(relation->rd_node.relNode,
+                                         GetCurrentSubTransactionId())) {
+        elog(ERROR, "cannot read from table when there is unflushed data in upper transactions");
     }
 
     MemoryContextSwitchTo(oldContext);
 
-    return ((TableScanDesc) scan);
+    return ((TableScanDesc) columnarScanDesc);
 }
 
-
-/*
- * CreateColumnarScanMemoryContext creates a memory context to store
- * ColumnarReadStare in it.
- */
-static MemoryContext
-CreateColumnarScanMemoryContext(void) {
+// creates a memory context to store ColumnarReadStare in it.
+static MemoryContext CreateColumnarScanMemoryContext(void) {
     return AllocSetContextCreate(CurrentMemoryContext, "Columnar Scan Context",
                                  ALLOCSET_DEFAULT_SIZES);
 }
 
-
-/*
- * init_columnar_read_state initializes a column store table read and returns the
- * state.
- */
-static ColumnarReadState *
-init_columnar_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_needed,
-                         List *scanQual, MemoryContext scanContext, Snapshot snapshot,
-                         bool randomAccess) {
+// init_columnar_read_state initializes a column store table read and returns the state.
+static ColumnarReadState *init_columnar_read_state(Relation relation,
+                                                   TupleDesc tupleDesc,
+                                                   Bitmapset *attr_needed,
+                                                   List *scanQual,
+                                                   MemoryContext scanContext,
+                                                   Snapshot snapshot,
+                                                   bool randomAccess) {
     MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-    List *neededColumnList = NeededColumnsList(tupdesc, attr_needed);
-    ColumnarReadState *readState = ColumnarBeginRead(relation, tupdesc, neededColumnList,
-                                                     scanQual, scanContext, snapshot,
-                                                     randomAccess);
+    // 要select的column的自然位置(1起始)
+    List *usedColNaturalPosList = NeededColumnsList(tupleDesc, attr_needed);
+
+    ColumnarReadState *columnarReadState = ColumnarBeginRead(relation,
+                                                             tupleDesc,
+                                                             usedColNaturalPosList,
+                                                             scanQual,
+                                                             scanContext,
+                                                             snapshot,
+                                                             randomAccess);
 
     MemoryContextSwitchTo(oldContext);
 
-    return readState;
+    return columnarReadState;
 }
 
-
-static void
-columnar_endscan(TableScanDesc sscan) {
+static void columnar_endscan(TableScanDesc sscan) {
     ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
-    if (scan->cs_readState != NULL) {
-        ColumnarEndRead(scan->cs_readState);
-        scan->cs_readState = NULL;
+    if (scan->columnarReadState != NULL) {
+        ColumnarEndRead(scan->columnarReadState);
+        scan->columnarReadState = NULL;
     }
 
-    if (scan->cs_base.rs_flags & SO_TEMP_SNAPSHOT) {
-        UnregisterSnapshot(scan->cs_base.rs_snapshot);
+    if (scan->tableScanDesc.rs_flags & SO_TEMP_SNAPSHOT) {
+        UnregisterSnapshot(scan->tableScanDesc.rs_snapshot);
     }
 }
 
-
-static void
-columnar_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
-                bool allow_strat, bool allow_sync, bool allow_pagemode) {
+static void columnar_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
+                            bool allow_strat, bool allow_sync, bool allow_pagemode) {
     ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 
     /* XXX: hack to pass in new quals that aren't actually scan keys */
     List *scanQual = (List *) key;
 
-    if (scan->cs_readState != NULL) {
-        ColumnarRescan(scan->cs_readState, scanQual);
+    if (scan->columnarReadState != NULL) {
+        ColumnarRescan(scan->columnarReadState, scanQual);
     }
 }
 
+static bool columnar_getnextslot(TableScanDesc tableScanDesc,
+                                 ScanDirection scanDirection,
+                                 TupleTableSlot *tupleTableSlot) {
+    ColumnarScanDesc columnarScanDesc = (ColumnarScanDesc) tableScanDesc;
 
-static bool
-columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot) {
-    ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
-
-    /*
-     * if this is the first row, initialize read state.
-     */
-    if (scan->cs_readState == NULL) {
+    // this is the first row ,initialize read state.
+    if (columnarScanDesc->columnarReadState == NULL) {
         bool randomAccess = false;
-        scan->cs_readState =
-                init_columnar_read_state(scan->cs_base.rs_rd, slot->tts_tupleDescriptor,
-                                         scan->attr_needed, scan->scanQual,
-                                         scan->scanContext, scan->cs_base.rs_snapshot,
-                                         randomAccess);
+        columnarScanDesc->columnarReadState = init_columnar_read_state(columnarScanDesc->tableScanDesc.rs_rd,
+                                                                       tupleTableSlot->tts_tupleDescriptor,
+                                                                       columnarScanDesc->attr_needed,
+                                                                       columnarScanDesc->scanQual,
+                                                                       columnarScanDesc->scanContext,
+                                                                       columnarScanDesc->tableScanDesc.rs_snapshot,
+                                                                       randomAccess);
     }
 
-    ExecClearTuple(slot);
+    ExecClearTuple(tupleTableSlot);
 
     uint64 rowNumber;
-    bool nextRowFound = ColumnarReadNextRow(scan->cs_readState, slot->tts_values,
-                                            slot->tts_isnull, &rowNumber);
+    bool nextRowFound = ColumnarReadNextRow(columnarScanDesc->columnarReadState,
+                                            tupleTableSlot->tts_values,
+                                            tupleTableSlot->tts_isnull,
+                                            &rowNumber);
 
     if (!nextRowFound) {
         return false;
     }
 
-    ExecStoreVirtualTuple(slot);
+    ExecStoreVirtualTuple(tupleTableSlot);
 
-    slot->tts_tid = row_number_to_tid(rowNumber);
+    tupleTableSlot->tts_tid = row_number_to_tid(rowNumber);
 
     return true;
 }
@@ -359,11 +360,8 @@ static ItemPointerData row_number_to_tid(uint64 rowNumber) {
 }
 
 
-/*
- * tid_to_row_number maps given ItemPointerData to rowNumber.
- */
-static uint64
-tid_to_row_number(ItemPointerData tid) {
+// tid_to_row_number maps given ItemPointerData to rowNumber.
+static uint64 tid_to_row_number(ItemPointerData tid) {
     uint64 rowNumber = ItemPointerGetBlockNumber(&tid) * VALID_ITEMPOINTER_OFFSETS +
                        ItemPointerGetOffsetNumber(&tid) - FirstOffsetNumber;
 
@@ -947,16 +945,13 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 }
 
 
-/*
- * NeededColumnsList returns a list of AttrNumber's for the columns that
- * are not dropped and specified by attr_needed.
- */
-static List *
-NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed) {
+// returns a list of AttrNumber's for the columns that are not dropped and specified by attr_needed.
+static List *NeededColumnsList(TupleDesc tupleDesc,
+                               Bitmapset *attr_needed) {
     List *columnList = NIL;
 
-    for (int i = 0; i < tupdesc->natts; i++) {
-        if (tupdesc->attrs[i].attisdropped) {
+    for (int i = 0; i < tupleDesc->natts; i++) {
+        if (tupleDesc->attrs[i].attisdropped) {
             continue;
         }
 
@@ -1897,7 +1892,7 @@ columnar_tableam_finish() {
  */
 int64
 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc) {
-    ColumnarReadState *readState = columnarScanDesc->cs_readState;
+    ColumnarReadState *readState = columnarScanDesc->columnarReadState;
 
     /* readState is initialized lazily */
     if (readState != NULL) {
@@ -2135,14 +2130,14 @@ static const TableAmRoutine columnar_am_methods = {
         .tuple_insert_speculative = columnar_tuple_insert_speculative, // 尚未实现
         .tuple_complete_speculative = columnar_tuple_complete_speculative, // 尚未实现
         .multi_insert = columnar_multi_insert,
-        .tuple_delete = columnar_tuple_delete,
-        .tuple_update = columnar_tuple_update,
-        .tuple_lock = columnar_tuple_lock,
-        .finish_bulk_insert = columnar_finish_bulk_insert,
+        .tuple_delete = columnar_tuple_delete,// 尚未实现
+        .tuple_update = columnar_tuple_update,// 尚未实现
+        .tuple_lock = columnar_tuple_lock,// 尚未实现
+        .finish_bulk_insert = columnar_finish_bulk_insert, // nothing
 
-        .relation_set_new_filenode = columnar_relation_set_new_filenode,
+        .relation_set_new_filenode = columnar_relation_set_new_filenode, // truncate时候
         .relation_nontransactional_truncate = columnar_relation_nontransactional_truncate,
-        .relation_copy_data = columnar_relation_copy_data,
+        .relation_copy_data = columnar_relation_copy_data,// 尚未实现
         .relation_copy_for_cluster = columnar_relation_copy_for_cluster,
         .relation_vacuum = columnar_vacuum_rel,
         .scan_analyze_next_block = columnar_scan_analyze_next_block,

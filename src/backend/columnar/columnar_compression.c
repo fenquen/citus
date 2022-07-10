@@ -20,30 +20,21 @@
 #include "columnar/columnar_compression.h"
 
 #if HAVE_CITUS_LIBLZ4
-
 #include <lz4.h>
-
 #endif
 
 #if HAVE_LIBZSTD
-
 #include <zstd.h>
-
 #endif
 
-/*
- *	The information at the start of the compressed data. This decription is taken
- *	from pg_lzcompress in pre-9.5 version of PostgreSQL.
- */
+// The information at the start of the compressed data. This decription is taken
+// from pg_lzcompress in pre-9.5 version of PostgreSQL.
 typedef struct ColumnarCompressHeader {
     int32 vl_len_;              /* varlena header (do not touch directly!) */
     int32 rawsize;
 } ColumnarCompressHeader;
 
-/*
- * Utilities for manipulation of header information for compressed data
- */
-
+// Utilities for manipulation of header information for compressed data
 #define COLUMNAR_COMPRESS_HDRSZ ((int32) sizeof(ColumnarCompressHeader))
 #define COLUMNAR_COMPRESS_RAWSIZE(ptr) (((ColumnarCompressHeader *) (ptr))->rawsize)
 #define COLUMNAR_COMPRESS_RAWDATA(ptr) (((char *) (ptr)) + COLUMNAR_COMPRESS_HDRSZ)

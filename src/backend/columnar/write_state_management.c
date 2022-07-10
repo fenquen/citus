@@ -292,22 +292,16 @@ MarkRelfilenodeDropped(Oid relfilenode, SubTransactionId currentSubXid) {
 }
 
 
-/*
- * Called when the given relfilenode is dropped in non-transactional TRUNCATE.
- */
-void
-NonTransactionDropWriteState(Oid relfilenode) {
+// Called when the given relfilenode is dropped in non-transactional TRUNCATE.
+void NonTransactionDropWriteState(Oid relfilenode) {
     if (WriteStateMap) {
         hash_search(WriteStateMap, &relfilenode, HASH_REMOVE, false);
     }
 }
 
-
-/*
- * Returns true if there are any pending writes in upper transactions.
- */
-bool
-PendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId currentSubXid) {
+// true if there are any pending writes in upper transactions.
+bool PendingWritesInUpperTransactions(Oid relfilenode,
+                                      SubTransactionId currentSubXid) {
     if (WriteStateMap == NULL) {
         return false;
     }

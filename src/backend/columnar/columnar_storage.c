@@ -354,18 +354,17 @@ ColumnarStorageIsCurrent(Relation rel) {
  * ColumnarStorageReserveRowNumber returns reservedRowNumber and advances
  * it for next row number reservation.
  */
-uint64
-ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows) {
-    LockRelationForExtension(rel, ExclusiveLock);
+uint64 ColumnarStorageReserveRowNumber(Relation relation, uint64 stripeRowLimit) {
+    LockRelationForExtension(relation, ExclusiveLock);
 
-    ColumnarMetapage metapage = ColumnarMetapageRead(rel, false);
+    ColumnarMetapage metapage = ColumnarMetapageRead(relation, false);
 
     uint64 firstRowNumber = metapage.reservedRowNumber;
-    metapage.reservedRowNumber += nrows;
+    metapage.reservedRowNumber += stripeRowLimit;
 
-    ColumnarOverwriteMetapage(rel, metapage);
+    ColumnarOverwriteMetapage(relation, metapage);
 
-    UnlockRelationForExtension(rel, ExclusiveLock);
+    UnlockRelationForExtension(relation, ExclusiveLock);
 
     return firstRowNumber;
 }
@@ -461,8 +460,9 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
     }
 }
 
-
-// map the logical offset to a block and offset, then write the buffer across multiple blocks if necessary
+// 写block
+// map the logical offset to a block and offset,
+// then write the buffer across multiple blocks if necessary
 void ColumnarStorageWrite(Relation relation,
                           uint64 logicalOffset,
                           char *data,

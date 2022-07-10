@@ -70,13 +70,10 @@ struct ColumnarReadState {
     Relation relation;
 
     StripeMetadata *currentStripeMetadata;
-    StripeReadState *stripeReadState;
+    StripeReadState *stripeReadState; // 是不是null 意味是不是StripeReadInProgress
 
-    /*
-     * Integer list of attribute numbers (1-indexed) for columns needed by the
-     * query.
-     */
-    List *projectedColumnList;
+    // Integer list of attribute numbers (1-indexed) for columns needed by the query.
+    List *usedColumnNaturalPosList;
 
     List *whereClauseList;
     List *whereClauseVars;
@@ -84,11 +81,8 @@ struct ColumnarReadState {
     MemoryContext stripeReadContext;
     int64 chunkGroupsFiltered;
 
-    /*
-     * Memory context guaranteed to be not freed during scan so we can
-     * safely use for any memory allocations regarding ColumnarReadState
-     * itself.
-     */
+    // Memory context guaranteed to be not freed during scan so we can
+    // safely use for any memory allocations regarding ColumnarReadState itself.
     MemoryContext scanContext;
 
     Snapshot snapshot;
@@ -115,7 +109,7 @@ static void ReadChunkGroupRowByRowOffset(ChunkGroupReadState *chunkGroupReadStat
                                          uint64 stripeRowOffset, Datum *columnValues,
                                          bool *columnNulls);
 
-static bool StripeReadInProgress(ColumnarReadState *readState);
+static bool StripeReadInProgress(ColumnarReadState *columnarReadState);
 
 static bool HasUnreadStripe(ColumnarReadState *readState);
 
@@ -125,7 +119,7 @@ static StripeReadState *BeginStripeRead(StripeMetadata *stripeMetadata, Relation
                                         MemoryContext stripeReadContext,
                                         Snapshot snapshot);
 
-static void AdvanceStripeRead(ColumnarReadState *readState);
+static void AdvanceStripeRead(ColumnarReadState *columnarReadState);
 
 static bool SnapshotMightSeeUnflushedStripes(Snapshot snapshot);
 
@@ -199,45 +193,42 @@ static Datum ColumnDefaultValue(TupleConstr *tupleConstraints,
  * ColumnarBeginRead initializes a columnar read operation. This function returns a
  * read handle that's used during reading rows and finishing the read operation.
  *
- * projectedColumnList is an integer list of attribute numbers (1-indexed).
+ * usedColNaturalPosList is an integer list of attribute numbers (1-indexed).
  */
-ColumnarReadState *
-ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
-                  List *projectedColumnList, List *whereClauseList,
-                  MemoryContext scanContext, Snapshot snapshot,
-                  bool randomAccess) {
+ColumnarReadState *ColumnarBeginRead(Relation relation,
+                                     TupleDesc tupleDesc,
+                                     List *usedColNaturalPosList,
+                                     List *whereClauseList,
+                                     MemoryContext scanContext,
+                                     Snapshot snapshot,
+                                     bool randomAccess) {
     /*
      * We allocate all stripe specific data in the stripeReadContext, and reset
-     * this memory context before loading a new stripe. This is to avoid memory
-     * leaks.
+     * this memory context before loading a new stripe. This is to avoid memory leaks.
      */
-    MemoryContext stripeReadContext = CreateStripeReadMemoryContext();
+    //  MemoryContext stripeReadContext = CreateStripeReadMemoryContext();
 
-    ColumnarReadState *readState = palloc0(sizeof(ColumnarReadState));
-    readState->relation = relation;
-    readState->projectedColumnList = projectedColumnList;
-    readState->whereClauseList = whereClauseList;
-    readState->whereClauseVars = GetClauseVars(whereClauseList, tupleDescriptor->natts);
-    readState->chunkGroupsFiltered = 0;
-    readState->tupleDescriptor = tupleDescriptor;
-    readState->stripeReadContext = stripeReadContext;
-    readState->stripeReadState = NULL;
-    readState->scanContext = scanContext;
+    ColumnarReadState *columnarReadState = palloc0(sizeof(ColumnarReadState));
 
-    /*
-     * Note that ColumnarReadFlushPendingWrites might update those two by
-     * registering a new snapshot.
-     */
-    readState->snapshot = snapshot;
-    readState->snapshotRegisteredByUs = false;
+    columnarReadState->relation = relation;
+    columnarReadState->usedColumnNaturalPosList = usedColNaturalPosList;
+    columnarReadState->whereClauseList = whereClauseList;
+    columnarReadState->whereClauseVars = GetClauseVars(whereClauseList, tupleDesc->natts);
+    columnarReadState->chunkGroupsFiltered = 0;
+    columnarReadState->tupleDescriptor = tupleDesc;
+    columnarReadState->stripeReadContext = CreateStripeReadMemoryContext();;
+    columnarReadState->stripeReadState = NULL;
+    columnarReadState->scanContext = scanContext;
+    // Note that ColumnarReadFlushPendingWrites might update those two by registering a new snapshot.
+    columnarReadState->snapshot = snapshot;
+    columnarReadState->snapshotRegisteredByUs = false;
 
     if (!randomAccess) {
         /*
-         * When doing random access (i.e.: index scan), we don't need to flush
-         * pending writes until we need to read them.
+         * When doing random access (i.e.: index scan),don't need to flush pending writes until we need to read them.
          * columnar_index_fetch_tuple would do so when needed.
          */
-        ColumnarReadFlushPendingWrites(readState);
+        ColumnarReadFlushPendingWrites(columnarReadState);
 
         /*
          * AdvanceStripeRead sets currentStripeMetadata for the first stripe
@@ -252,15 +243,13 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
          * Note that this is not the case with for plain table scan methods
          * (i.e.: SeqScan and Columnar CustomScan).
          *
-         * For those reasons, we don't call AdvanceStripeRead if we will do
-         * random access.
+         * For those reasons, we don't call AdvanceStripeRead if we will do random access.
          */
-        AdvanceStripeRead(readState);
+        AdvanceStripeRead(columnarReadState);
     }
 
-    return readState;
+    return columnarReadState;
 }
-
 
 /*
  * ColumnarReadFlushPendingWrites flushes pending writes for read operation
@@ -270,17 +259,16 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
  * indicate that caller should unregister the snapshot after finishing read
  * operation.
  *
- * Note that this function assumes that readState's relation and snapshot
+ * Note that this function assumes that columnarReadState's relation and snapshot
  * fields are already set.
  */
-void
-ColumnarReadFlushPendingWrites(ColumnarReadState *readState) {
-    Assert(!readState->snapshotRegisteredByUs);
+void ColumnarReadFlushPendingWrites(ColumnarReadState *columnarReadState) {
+    Assert(!columnarReadState->snapshotRegisteredByUs);
 
-    Oid relfilenode = readState->relation->rd_node.relNode;
-    FlushWriteStateForRelfilenode(relfilenode, GetCurrentSubTransactionId());
+    FlushWriteStateForRelfilenode(columnarReadState->relation->rd_node.relNode,
+                                  GetCurrentSubTransactionId());
 
-    if (readState->snapshot == InvalidSnapshot || !IsMVCCSnapshot(readState->snapshot)) {
+    if (columnarReadState->snapshot == InvalidSnapshot || !IsMVCCSnapshot(columnarReadState->snapshot)) {
         return;
     }
 
@@ -298,7 +286,7 @@ ColumnarReadFlushPendingWrites(ColumnarReadState *readState) {
      * pending writes, see the discussion in
      * https://github.com/citusdata/citus/issues/5231.
      */
-    PushCopiedSnapshot(readState->snapshot);
+    PushCopiedSnapshot(columnarReadState->snapshot);
 
     /* now our snapshot is the active one */
     UpdateActiveSnapshotCommandId();
@@ -316,56 +304,51 @@ ColumnarReadFlushPendingWrites(ColumnarReadState *readState) {
      */
     PopActiveSnapshot();
 
-    readState->snapshot = newSnapshot;
+    columnarReadState->snapshot = newSnapshot;
 
     /* not forget to unregister it when finishing read operation */
-    readState->snapshotRegisteredByUs = true;
+    columnarReadState->snapshotRegisteredByUs = true;
 }
 
 
-/*
- * CreateStripeReadMemoryContext creates a memory context to be used when
- * reading a stripe.
- */
-static MemoryContext
-CreateStripeReadMemoryContext() {
-    return AllocSetContextCreate(CurrentMemoryContext, "Stripe Read Memory Context",
-                                 ALLOCSET_DEFAULT_SIZES);
+// create a memory context to be used when reading a stripe.
+static MemoryContext CreateStripeReadMemoryContext() {
+    return AllocSetContextCreate(CurrentMemoryContext, "Stripe Read Memory Context", ALLOCSET_DEFAULT_SIZES);
 }
-
 
 /*
  * ColumnarReadNextRow tries to read a row from the columnar table. On success, it sets
  * column values, column nulls and rowNumber (if passed to be non-NULL), and returns true.
  * If there are no more rows to read, the function returns false.
  */
-bool
-ColumnarReadNextRow(ColumnarReadState *readState, Datum *columnValues, bool *columnNulls,
-                    uint64 *rowNumber) {
+bool ColumnarReadNextRow(ColumnarReadState *columnarReadState,
+                         Datum *columnValues,
+                         bool *columnNulls,
+                         uint64 *rowNumber) {
     while (true) {
-        if (!StripeReadInProgress(readState)) {
-            if (!HasUnreadStripe(readState)) {
+        if (!StripeReadInProgress(columnarReadState)) {
+            if (!HasUnreadStripe(columnarReadState)) {
                 return false;
             }
 
-            readState->stripeReadState = BeginStripeRead(readState->currentStripeMetadata,
-                                                         readState->relation,
-                                                         readState->tupleDescriptor,
-                                                         readState->projectedColumnList,
-                                                         readState->whereClauseList,
-                                                         readState->whereClauseVars,
-                                                         readState->stripeReadContext,
-                                                         readState->snapshot);
+            columnarReadState->stripeReadState = BeginStripeRead(columnarReadState->currentStripeMetadata,
+                                                                 columnarReadState->relation,
+                                                                 columnarReadState->tupleDescriptor,
+                                                                 columnarReadState->usedColumnNaturalPosList,
+                                                                 columnarReadState->whereClauseList,
+                                                                 columnarReadState->whereClauseVars,
+                                                                 columnarReadState->stripeReadContext,
+                                                                 columnarReadState->snapshot);
         }
 
-        if (!ReadStripeNextRow(readState->stripeReadState, columnValues, columnNulls)) {
-            AdvanceStripeRead(readState);
+        if (!ReadStripeNextRow(columnarReadState->stripeReadState, columnValues, columnNulls)) {
+            AdvanceStripeRead(columnarReadState);
             continue;
         }
 
         if (rowNumber) {
-            *rowNumber = readState->currentStripeMetadata->firstRowNumber +
-                         readState->stripeReadState->currentRow - 1;
+            *rowNumber = columnarReadState->currentStripeMetadata->firstRowNumber +
+                         columnarReadState->stripeReadState->currentRow - 1;
         }
 
         return true;
@@ -434,7 +417,7 @@ ColumnarReadRowByRowNumber(ColumnarReadState *readState,
         readState->stripeReadState = BeginStripeRead(stripeMetadata,
                                                      columnarRelation,
                                                      relationTupleDesc,
-                                                     readState->projectedColumnList,
+                                                     readState->usedColumnNaturalPosList,
                                                      whereClauseList,
                                                      whereClauseVars,
                                                      stripeReadContext,
@@ -553,21 +536,17 @@ ReadChunkGroupRowByRowOffset(ChunkGroupReadState *chunkGroupReadState,
 }
 
 
-/*
- * StripeReadInProgress returns true if we already started reading a stripe.
- */
-static bool
-StripeReadInProgress(ColumnarReadState *readState) {
-    return readState->stripeReadState != NULL;
+// columnarReadState->stripeReadState != NULL;
+// true if we already started reading a stripe.
+static bool StripeReadInProgress(ColumnarReadState *columnarReadState) {
+    return columnarReadState->stripeReadState != NULL;
 }
 
 
 /*
- * HasUnreadStripe returns true if we still have stripes to read during current
- * read operation.
+ * returns true if we still have stripes to read during current read operation.
  */
-static bool
-HasUnreadStripe(ColumnarReadState *readState) {
+static bool HasUnreadStripe(ColumnarReadState *readState) {
     return readState->currentStripeMetadata != NULL;
 }
 
@@ -629,14 +608,15 @@ ColumnarResetRead(ColumnarReadState *readState) {
     }
 }
 
-
-/*
- * BeginStripeRead allocates state for reading a stripe.
- */
-static StripeReadState *
-BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDesc,
-                List *projectedColumnList, List *whereClauseList, List *whereClauseVars,
-                MemoryContext stripeReadContext, Snapshot snapshot) {
+// allocate state for reading a stripe.
+static StripeReadState *BeginStripeRead(StripeMetadata *stripeMetadata,
+                                        Relation rel,
+                                        TupleDesc tupleDesc,
+                                        List *projectedColumnList,
+                                        List *whereClauseList,
+                                        List *whereClauseVars,
+                                        MemoryContext stripeReadContext,
+                                        Snapshot snapshot) {
     MemoryContext oldContext = MemoryContextSwitchTo(stripeReadContext);
 
     StripeReadState *stripeReadState = palloc0(sizeof(StripeReadState));
@@ -666,52 +646,45 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
     return stripeReadState;
 }
 
+// update chunkGroupsFiltered and set current StripeMetadata for next stripe read.
+static void AdvanceStripeRead(ColumnarReadState *columnarReadState) {
+    MemoryContext oldContext = MemoryContextSwitchTo(columnarReadState->scanContext);
 
-/*
- * AdvanceStripeRead updates chunkGroupsFiltered and sets
- * currentStripeMetadata for next stripe read.
- */
-static void
-AdvanceStripeRead(ColumnarReadState *readState) {
-    MemoryContext oldContext = MemoryContextSwitchTo(readState->scanContext);
-
-    /* if not read any stripes yet, start from the first one .. */
+    // if not read any stripes yet, start from the first one
     uint64 lastReadRowNumber = COLUMNAR_INVALID_ROW_NUMBER;
-    if (StripeReadInProgress(readState)) {
-        /* .. otherwise, continue with the next stripe */
-        lastReadRowNumber = StripeGetHighestRowNumber(readState->currentStripeMetadata);
 
-        readState->chunkGroupsFiltered +=
-                readState->stripeReadState->chunkGroupsFiltered;
+    if (StripeReadInProgress(columnarReadState)) {
+        /* .. otherwise, continue with the next stripe */
+        lastReadRowNumber = StripeGetHighestRowNumber(columnarReadState->currentStripeMetadata);
+
+        columnarReadState->chunkGroupsFiltered += columnarReadState->stripeReadState->chunkGroupsFiltered;
     }
 
-    readState->currentStripeMetadata = FindNextStripeByRowNumber(readState->relation,
-                                                                 lastReadRowNumber,
-                                                                 readState->snapshot);
+    columnarReadState->currentStripeMetadata = FindNextStripeByRowNumber(columnarReadState->relation,
+                                                                         lastReadRowNumber,
+                                                                         columnarReadState->snapshot);
 
-    if (readState->currentStripeMetadata &&
-        StripeWriteState(readState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED &&
-        !SnapshotMightSeeUnflushedStripes(readState->snapshot)) {
+    if (columnarReadState->currentStripeMetadata &&
+        StripeWriteState(columnarReadState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED &&
+        !SnapshotMightSeeUnflushedStripes(columnarReadState->snapshot)) {
         /*
          * To be on the safe side, error out if we don't expect to encounter
-         * with an un-flushed stripe. Otherwise, we will skip such stripes
-         * until finding a flushed one.
+         * with an un-flushed stripe. Otherwise, we will skip such stripes until finding a flushed one.
          */
         ereport(ERROR, (errmsg(UNEXPECTED_STRIPE_READ_ERR_MSG,
-                               RelationGetRelationName(readState->relation),
-                               readState->currentStripeMetadata->id)));
+                               RelationGetRelationName(columnarReadState->relation),
+                               columnarReadState->currentStripeMetadata->id)));
     }
 
-    while (readState->currentStripeMetadata &&
-           StripeWriteState(readState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED) {
-        readState->currentStripeMetadata =
-                FindNextStripeByRowNumber(readState->relation,
-                                          readState->currentStripeMetadata->firstRowNumber,
-                                          readState->snapshot);
+    while (columnarReadState->currentStripeMetadata &&
+           StripeWriteState(columnarReadState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED) {
+        columnarReadState->currentStripeMetadata = FindNextStripeByRowNumber(columnarReadState->relation,
+                                                                             columnarReadState->currentStripeMetadata->firstRowNumber,
+                                                                             columnarReadState->snapshot);
     }
 
-    readState->stripeReadState = NULL;
-    MemoryContextReset(readState->stripeReadContext);
+    columnarReadState->stripeReadState = NULL; // 对应函数 StripeReadInProgress
+    MemoryContextReset(columnarReadState->stripeReadContext);
 
     MemoryContextSwitchTo(oldContext);
 }
@@ -722,8 +695,7 @@ AdvanceStripeRead(ColumnarReadState *readState) {
  * expected to see un-flushed stripes either because of other backends'
  * pending writes or aborted transactions.
  */
-static bool
-SnapshotMightSeeUnflushedStripes(Snapshot snapshot) {
+static bool SnapshotMightSeeUnflushedStripes(Snapshot snapshot) {
     if (snapshot == InvalidSnapshot) {
         return false;
     }
@@ -895,7 +867,7 @@ ChunkData *CreateEmptyChunkData(uint32 columnCount,
 
     chunkData->existsArray = palloc0(columnCount * sizeof(bool *));
     chunkData->valueArray = palloc0(columnCount * sizeof(Datum *));
-    chunkData->valueBufferArray = palloc0(columnCount * sizeof(StringInfo));
+    chunkData->columnDataArr = palloc0(columnCount * sizeof(StringInfo));
 
     // allocate chunk memory for deserialized data
     // columnCount 乘以 chunkRowLimit
@@ -903,7 +875,7 @@ ChunkData *CreateEmptyChunkData(uint32 columnCount,
         if (columnMask[columnIndex]) {
             chunkData->existsArray[columnIndex] = palloc0(chunkRowCount * sizeof(bool));
             chunkData->valueArray[columnIndex] = palloc0(chunkRowCount * sizeof(Datum));
-            chunkData->valueBufferArray[columnIndex] = NULL;
+            chunkData->columnDataArr[columnIndex] = NULL;
         }
     }
 
@@ -1525,7 +1497,7 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
                                   chunkData->valueArray[columnIndex]);
 
             /* store current chunk's data buffer to be freed at next chunk read */
-            chunkData->valueBufferArray[columnIndex] = valueBuffer;
+            chunkData->columnDataArr[columnIndex] = valueBuffer;
         } else if (columnAdded) {
             /*
              * This is a column that was added after creation of this stripe.

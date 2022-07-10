@@ -22,8 +22,9 @@ CREATE TABLE columnar_table (
 
 
 INSERT INTO columnar_table (id, addr) values (1,'a');
-INSERT INTO columnar_table (id, addr) SELECT d, 'a' FROM generate_series(1,200000) d;
+INSERT INTO columnar_table (id, addr) SELECT d, 'a' FROM generate_series(1,20000) d;
 
 SELECT alter_columnar_table_set('columnar_table',stripe_row_limit => 100000);
 
 chunk是针对某个column的 表有多个的column  那么这些的column构成chunk_group
+bms的意思是bit map set

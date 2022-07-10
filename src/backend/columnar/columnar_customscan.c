@@ -51,7 +51,7 @@
  * CustomScanState with additional fields specific to columnar scans.
  */
 typedef struct ColumnarScanState {
-    CustomScanState custom_scanstate; /* must be first field */
+    CustomScanState customScanState; /* must be first field */
 
     ExprContext *css_RuntimeContext;
     List *qual;
@@ -74,14 +74,17 @@ static void CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
                              int nClauses);
 
 /* functions to add new paths */
-static void AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel,
-                                 RangeTblEntry *rte);
+static void AddColumnarScanPaths(PlannerInfo *root,
+                                 RelOptInfo *relOptInfo,
+                                 RangeTblEntry *rangeTblEntry);
 
-static void AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel,
-                                RangeTblEntry *rte, Relids required_relids);
+static void AddColumnarScanPath(PlannerInfo *root,
+                                RelOptInfo *relOptInfo,
+                                RangeTblEntry *rangeTblEntry,
+                                Relids required_relids);
 
 /* helper functions to be used when costing paths or altering them */
-static void RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate);
+static void RemovePathsByPredicate(RelOptInfo *relOptInfo, PathPredicate removePathPredicate);
 
 static bool IsNotIndexPath(Path *path);
 
@@ -98,17 +101,22 @@ static uint64 ColumnarTableStripeCount(Oid relationId);
 static Path *CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel,
                                        Oid relationId);
 
-static void AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel,
-                                    RangeTblEntry *rte, Relids paramRelids,
-                                    Relids candidateRelids,
-                                    int depthLimit);
+static void AddColumnarScanPathsRecursive(PlannerInfo *root,
+                                          RelOptInfo *relOptInfo,
+                                          RangeTblEntry *rangeTblEntry, Relids paramRelids,
+                                          Relids candidateRelids,
+                                          int depthLimit);
 
 /* hooks and callbacks */
-static void ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
-                                       RangeTblEntry *rte);
+static void ColumnarSetRelPathlistHook(PlannerInfo *root,
+                                       RelOptInfo *relOptInfo,
+                                       Index rti,
+                                       RangeTblEntry *rangeTblEntry);
 
-static void ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
-                                        bool inhparent, RelOptInfo *rel);
+static void ColumnarGetRelationInfoHook(PlannerInfo *root,
+                                        Oid relationObjectId,
+                                        bool inhparent,
+                                        RelOptInfo *rel);
 
 static Plan *ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
                                              RelOptInfo *rel,
@@ -123,7 +131,8 @@ static List *ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 
 static Node *ColumnarScan_CreateCustomScanState(CustomScan *cscan);
 
-static void ColumnarScan_BeginCustomScan(CustomScanState *node, EState *estate,
+static void ColumnarScan_BeginCustomScan(CustomScanState *customScanState,
+                                         EState *estate,
                                          int eflags);
 
 static TupleTableSlot *ColumnarScan_ExecCustomScan(CustomScanState *node);
@@ -132,7 +141,8 @@ static void ColumnarScan_EndCustomScan(CustomScanState *node);
 
 static void ColumnarScan_ReScanCustomScan(CustomScanState *node);
 
-static void ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
+static void ColumnarScan_ExplainCustomScan(CustomScanState *node,
+                                           List *ancestors,
                                            ExplainState *es);
 
 /* helper functions to build strings for EXPLAIN */
@@ -161,20 +171,19 @@ static double ColumnarQualPushdownCorrelationThreshold = 0.9;
 static int ColumnarMaxCustomScanPaths = 64;
 static int ColumnarPlannerDebugLevel = DEBUG3;
 
-
-const struct CustomPathMethods ColumnarScanPathMethods = {
-        .CustomName = "ColumnarScan",
+const struct CustomPathMethods ColumnarScan_PathMethods = {
+        .CustomName = "columnarScan_path",
         .PlanCustomPath = ColumnarScanPath_PlanCustomPath,
         .ReparameterizeCustomPathByChild = ColumnarScanPath_ReparameterizeCustomPathByChild,
 };
 
-const struct CustomScanMethods ColumnarScanScanMethods = {
-        .CustomName = "ColumnarScan",
+const struct CustomScanMethods ColumnarScan_ScanMethods = {
+        .CustomName = "columnarScan_scan",
         .CreateCustomScanState = ColumnarScan_CreateCustomScanState,
 };
 
-const struct CustomExecMethods ColumnarScanExecuteMethods = {
-        .CustomName = "ColumnarScan",
+const struct CustomExecMethods ColumnarScan_ExecMethods = {
+        .CustomName = "columnarScan_exec",
 
         .BeginCustomScan = ColumnarScan_BeginCustomScan,
         .ExecCustomScan = ColumnarScan_ExecCustomScan,
@@ -198,13 +207,11 @@ static const struct config_enum_entry debug_level_options[] = {
         {NULL, 0,            false}
 };
 
-
 /*
  * columnar_customscan_init installs the hook required to intercept the postgres planner and
  * provide extra paths for columnar tables
  */
-void
-columnar_customscan_init() {
+void columnar_customscan_init() {
     PreviousSetRelPathlistHook = set_rel_pathlist_hook;
     set_rel_pathlist_hook = ColumnarSetRelPathlistHook;
 
@@ -271,19 +278,22 @@ columnar_customscan_init() {
             NULL,
             NULL);
 
-    RegisterCustomScanMethods(&ColumnarScanScanMethods);
+    RegisterCustomScanMethods(&ColumnarScan_ScanMethods);
 }
 
 
-static void
-ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
-                           RangeTblEntry *rte) {
-    /* call into previous hook if assigned */
+static void ColumnarSetRelPathlistHook(PlannerInfo *root,
+                                       RelOptInfo *relOptInfo,
+                                       Index rti,
+                                       RangeTblEntry *rangeTblEntry) {
+    // call previous hook if assigned
     if (PreviousSetRelPathlistHook) {
-        PreviousSetRelPathlistHook(root, rel, rti, rte);
+        PreviousSetRelPathlistHook(root, relOptInfo, rti, rangeTblEntry);
     }
 
-    if (!OidIsValid(rte->relid) || rte->rtekind != RTE_RELATION || rte->inh) {
+    if (!OidIsValid(rangeTblEntry->relid) ||
+        rangeTblEntry->rtekind != RTE_RELATION ||
+        rangeTblEntry->inh) {
         /* some calls to the pathlist hook don't have a valid relation set. Do nothing */
         return;
     }
@@ -293,18 +303,15 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
      * If that is the case we want to insert an extra path that pushes down the projection
      * into the scan of the table to minimize the data read.
      */
-    Relation relation = RelationIdGetRelation(rte->relid);
+    Relation relation = RelationIdGetRelation(rangeTblEntry->relid);
     if (relation->rd_tableam == GetColumnarTableAmRoutine()) {
-        if (rte->tablesample != NULL) {
+        if (rangeTblEntry->tablesample != NULL) {
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                     errmsg("sample scans not supported on columnar tables")));
         }
 
-        if (list_length(rel->partial_pathlist) != 0) {
-            /*
-             * Parallel scans on columnar tables are already discardad by
-             * ColumnarGetRelationInfoHook but be on the safe side.
-             */
+        if (list_length(relOptInfo->partial_pathlist) != 0) {
+            // Parallel scans on columnar tables are discarded by ColumnarGetRelationInfoHook but be on the safe side.
             elog(ERROR, "parallel scans on columnar are not supported");
         }
 
@@ -319,13 +326,13 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
          * Before doing that, we first re-cost all the existing paths so that
          * add_path makes correct cost comparisons when appending our SeqPath.
          */
-        CostColumnarPaths(root, rel, rte->relid);
+        CostColumnarPaths(root, relOptInfo, rangeTblEntry->relid);
 
-        Path *seqPath = CreateColumnarSeqScanPath(root, rel, rte->relid);
-        add_path(rel, seqPath);
+        Path *seqPath = CreateColumnarSeqScanPath(root, relOptInfo, rangeTblEntry->relid);
+        add_path(relOptInfo, seqPath);
 
         if (EnableColumnarCustomScan) {
-            ereport(DEBUG1, (errmsg("pathlist hook for columnar table am")));
+            ereport(DEBUG1, (errmsg("path list hook for columnar table am")));
 
             /*
              * When columnar custom scan is enabled (columnar.enable_custom_scan),
@@ -334,16 +341,17 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
              * comparisons between them.
              *
              * Even more, we might calculate an equal cost for a
-             * ColumnarCustomScan and a SeqPath if we are reading all columns
+             * ColumnarCustomScan and a SeqPath(create_seqscan_path) if we are reading all columns
              * of given table since we don't consider chunk group filtering
              * when costing ColumnarCustomScan.
              * In that case, if we don't remove SeqPath's, we might wrongly choose
              * SeqPath thinking that its cost would be equal to ColumnarCustomScan.
              */
-            RemovePathsByPredicate(rel, IsNotIndexPath);
-            AddColumnarScanPaths(root, rel, rte);
+            RemovePathsByPredicate(relOptInfo, IsNotIndexPath);
+            AddColumnarScanPaths(root, relOptInfo, rangeTblEntry);
         }
     }
+
     RelationClose(relation);
 }
 
@@ -370,35 +378,29 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 
 /*
  * RemovePathsByPredicate removes the paths that removePathPredicate
- * evaluates to true from pathlist of given rel.
+ * evaluates to true from pathlist of given relOptInfo.
  */
-static void
-RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate) {
+static void RemovePathsByPredicate(RelOptInfo *relOptInfo,
+                                   PathPredicate removePathPredicate) { // IsNotIndexPath
     List *filteredPathList = NIL;
 
     Path *path = NULL;
-    foreach_ptr(path, rel->pathlist) {
+    foreach_ptr(path, relOptInfo->pathlist) {
         if (!removePathPredicate(path)) {
             filteredPathList = lappend(filteredPathList, path);
         }
     }
 
-    rel->pathlist = filteredPathList;
+    relOptInfo->pathlist = filteredPathList;
 }
 
-
-/*
- * IsNotIndexPath returns true if given path is not an IndexPath.
- */
-static bool
-IsNotIndexPath(Path *path) {
+// true if path is not an IndexPath.
+static bool IsNotIndexPath(Path *path) {
     return !IsA(path, IndexPath);
 }
 
-
 /*
- * CreateColumnarSeqScanPath returns Path for sequential scan on columnar
- * table with relationId.
+ * returns Path for sequential scan on columnar table with relationId.
  */
 static Path *
 CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
@@ -412,12 +414,8 @@ CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
 }
 
 
-/*
- * CostColumnarPaths re-costs paths of given RelOptInfo for
- * columnar table with relationId.
- */
-static void
-CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
+// re-costs paths of given RelOptInfo for columnar table with relationId.
+static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
     Path *path = NULL;
     foreach_ptr(path, rel->pathlist) {
         if (IsA(path, IndexPath)) {
@@ -668,7 +666,7 @@ ExprReferencesRelid(Expr *expr, Index relid) {
 
 
 /*
- * ExtractPushdownClause extracts an Expr node from given clause for pushing down
+ * ExtractPushDownClause extracts an Expr node from given clause for pushing down
  * into the given rel (including join clauses). This test may not be exact in
  * all cases; it's used to reduce the search space for parameterization.
  *
@@ -715,8 +713,7 @@ ExprReferencesRelid(Expr *expr, Index relid) {
  * expressions, we will pushdown the following:
  *  (a < 200) OR ((a = 300) OR (a > 400))
  */
-static Expr *
-ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node) {
+static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *node) {
     CHECK_FOR_INTERRUPTS();
     check_stack_depth();
 
@@ -743,7 +740,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node) {
 
         Node *boolExprArg = NULL;
         foreach_ptr(boolExprArg, boolExpr->args) {
-            Expr *pushdownableArg = ExtractPushdownClause(root, rel,
+            Expr *pushdownableArg = ExtractPushDownClause(root, rel,
                                                           (Node *) boolExprArg);
             if (pushdownableArg) {
                 pushdownableArgs = lappend(pushdownableArgs, pushdownableArg);
@@ -872,37 +869,37 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node) {
 }
 
 
-/*
- * FilterPushdownClauses filters for clauses that are candidates for pushing
- * down into rel.
- */
-static List *
-FilterPushdownClauses(PlannerInfo *root, RelOptInfo *rel, List *inputClauses) {
+// filter clauses that are candidates for pushing down into relOptInfo.
+static List *FilterPushDownClauses(PlannerInfo *root,
+                                   RelOptInfo *relOptInfo,
+                                   List *inputClauses) {
     List *filteredClauses = NIL;
-    ListCell *lc;
-    foreach(lc, inputClauses) {
-        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+    ListCell *listCell;
+    foreach(listCell, inputClauses) {
+        RestrictInfo *restrictInfo = (RestrictInfo *) lfirst(listCell);
 
         /*
-         * Ignore clauses that don't refer to this rel, and pseudoconstants.
+         * Ignore clauses that don't refer to this relOptInfo, and pseudoconstants.
          *
          * XXX: A pseudoconstant may be of use, but it doesn't make sense to
          * push it down because it doesn't contain any Vars. Look into if
          * there's something we should do with pseudoconstants here.
          */
-        if (rinfo->pseudoconstant ||
-            !bms_is_member(rel->relid, rinfo->required_relids)) {
+        if (restrictInfo->pseudoconstant ||
+            !bms_is_member(relOptInfo->relid, restrictInfo->required_relids)) {
             continue;
         }
 
-        Expr *pushdownableExpr = ExtractPushdownClause(root, rel, (Node *) rinfo->clause);
-        if (!pushdownableExpr) {
+        Expr *pushDownExpr = ExtractPushDownClause(root, relOptInfo, (Node *) restrictInfo->clause);
+        if (!pushDownExpr) {
             continue;
         }
 
-        rinfo = copyObject(rinfo);
-        rinfo->clause = pushdownableExpr;
-        filteredClauses = lappend(filteredClauses, rinfo);
+        restrictInfo = copyObject(restrictInfo);
+        restrictInfo->clause = pushDownExpr;
+
+        filteredClauses = lappend(filteredClauses, restrictInfo);
     }
 
     return filteredClauses;
@@ -910,39 +907,41 @@ FilterPushdownClauses(PlannerInfo *root, RelOptInfo *rel, List *inputClauses) {
 
 
 /*
- * PushdownJoinClauseMatches is a callback that returns true, indicating that
- * we want all of the clauses from generate_implied_equalities_for_column().
+ * callback that returns true, indicating that
+ * we want all the clauses from generate_implied_equalities_for_column().
  */
-static bool
-PushdownJoinClauseMatches(PlannerInfo *root, RelOptInfo *rel,
-                          EquivalenceClass *ec, EquivalenceMember *em,
-                          void *arg) {
+static bool PushdownJoinClauseMatches(PlannerInfo *root,
+                                      RelOptInfo *rel,
+                                      EquivalenceClass *ec,
+                                      EquivalenceMember *em,
+                                      void *arg) {
     return true;
 }
 
 
-/*
- * FindPushdownJoinClauses finds join clauses, including those implied by ECs,
- * that may be pushed down.
- */
-static List *
-FindPushdownJoinClauses(PlannerInfo *root, RelOptInfo *rel) {
-    List *joinClauses = copyObject(rel->joininfo);
+// finds join clauses including those implied by ECs, that may be pushed down.
+static List *FindPushdownJoinClauses(PlannerInfo *root, RelOptInfo *relOptInfo) {
+    List *joinClauses = copyObject(relOptInfo->joininfo);
 
     /*
+     * 涉及到pg的参数化路径 https://blog.csdn.net/shujiezhang/article/details/108729263
+     *
      * Here we are generating the clauses just so we can later extract the
      * interesting relids. This is somewhat wasteful, but it allows us to
-     * filter out joinclauses, reducing the number of relids we need to
+     * filter out join clauses, reducing the number of relids we need to
      * consider.
      *
-     * XXX: also find additional clauses for joininfo that are implied by ECs?
+     * XXX: also find additional clauses for join info that are implied by ECs?
      */
-    List *ecClauses = generate_implied_equalities_for_column(
-            root, rel, PushdownJoinClauseMatches, NULL,
-            rel->lateral_referencers);
+    List *ecClauses = generate_implied_equalities_for_column(root,
+                                                             relOptInfo,
+                                                             PushdownJoinClauseMatches,
+                                                             NULL,
+                                                             relOptInfo->lateral_referencers);
+
     List *allClauses = list_concat(joinClauses, ecClauses);
 
-    return FilterPushdownClauses(root, rel, allClauses);
+    return FilterPushDownClauses(root, relOptInfo, allClauses);
 }
 
 
@@ -951,22 +950,25 @@ FindPushdownJoinClauses(PlannerInfo *root, RelOptInfo *rel) {
  * list of join clauses.
  *
  * Some rels cannot be considered for parameterization, such as a partitioned
- * parent of the given rel. Other rels are just not useful because they don't
+ * parent of the given relOptInfo. Other rels are just not useful because they don't
  * appear in a join clause that could be pushed down.
  */
-static Relids
-FindCandidateRelids(PlannerInfo *root, RelOptInfo *rel, List *joinClauses) {
-    Relids candidateRelids = NULL;
-    ListCell *lc;
-    foreach(lc, joinClauses) {
-        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+static Relids FindCandidateRelids(PlannerInfo *root,
+                                  RelOptInfo *relOptInfo,
+                                  List *joinClauseList) {
 
-        candidateRelids = bms_add_members(candidateRelids,
-                                          rinfo->required_relids);
+    Relids candidateRelids = NULL;
+
+    ListCell *listCell;
+    foreach(listCell, joinClauseList) {
+        RestrictInfo *restrictInfo = (RestrictInfo *) lfirst(listCell);
+
+        candidateRelids = bms_add_members(candidateRelids, restrictInfo->required_relids);
     }
 
-    candidateRelids = bms_del_members(candidateRelids, rel->relids);
-    candidateRelids = bms_del_members(candidateRelids, rel->lateral_relids);
+    candidateRelids = bms_del_members(candidateRelids, relOptInfo->relids);
+    candidateRelids = bms_del_members(candidateRelids, relOptInfo->lateral_relids);
+
     return candidateRelids;
 }
 
@@ -981,8 +983,7 @@ FindCandidateRelids(PlannerInfo *root, RelOptInfo *rel, List *joinClauses) {
  *    (2) Combinations(n, k) = (n*(n-1)..(n-k+1)) / (k*(k-1)..1)
  *    (5) Combinations(n, k) = Combinations(n, n-k)
  */
-static double
-Combinations(int n, int k) {
+static double Combinations(int n, int k) {
     double v = 1;
 
     /*
@@ -1022,8 +1023,7 @@ Combinations(int n, int k) {
  * There's no closed formula for a partial sum of combinations, so just keep
  * increasing the depth until the number of combinations exceeds the limit.
  */
-static int
-ChooseDepthLimit(int nCandidates) {
+static int ChooseDepthLimit(int nCandidates) {
     if (!EnableColumnarQualPushdown) {
         return 0;
     }
@@ -1044,28 +1044,35 @@ ChooseDepthLimit(int nCandidates) {
     return depth;
 }
 
-
 /*
  * AddColumnarScanPaths is the entry point for recursively generating
- * parameterized paths. See AddColumnarScanPathsRec() for discussion.
+ * parameterized paths. See AddColumnarScanPathsRecursive() for discussion.
  */
-static void
-AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte) {
-    List *joinClauses = FindPushdownJoinClauses(root, rel);
-    Relids candidateRelids = FindCandidateRelids(root, rel, joinClauses);
+static void AddColumnarScanPaths(PlannerInfo *root,
+                                 RelOptInfo *relOptInfo,
+                                 RangeTblEntry *rangeTblEntry) {
+    List *joinClauses = FindPushdownJoinClauses(root, relOptInfo);
+
+    Relids candidateRelids = FindCandidateRelids(root,
+                                                 relOptInfo,
+                                                 joinClauses);
 
     int depthLimit = ChooseDepthLimit(bms_num_members(candidateRelids));
 
     /* must always parameterize by lateral refs */
-    Relids paramRelids = bms_copy(rel->lateral_relids);
+    Relids paramRelids = bms_copy(relOptInfo->lateral_relids);
 
-    AddColumnarScanPathsRec(root, rel, rte, paramRelids, candidateRelids,
-                            depthLimit);
+    AddColumnarScanPathsRecursive(root,
+                                  relOptInfo,
+                                  rangeTblEntry,
+                                  paramRelids,
+                                  candidateRelids,
+                                  depthLimit);
 }
 
 
 /*
- * AddColumnarScanPathsRec is a recursive function to search the
+ * AddColumnarScanPathsRecursive is a recursive function to search the
  * parameterization space and add CustomPaths for columnar scans.
  *
  * The set paramRelids is the parameterization at the current level, and
@@ -1074,7 +1081,7 @@ AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte) {
  *
  * Columnar tables resemble indexes because of the ability to push down
  * quals. Ordinary quals, such as x = 7, can be pushed down easily. But join
- * quals of the form "x = y" (where "y" comes from another rel) require the
+ * quals of the form "x = y" (where "y" comes from another relOptInfo) require the
  * proper parameterization.
  *
  * Paths that require more outer rels can push down more join clauses that
@@ -1094,15 +1101,20 @@ AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte) {
  * path. A depthLimit of zero means that only the minimally-parameterized path
  * will be generated.
  */
-static void
-AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
-                        Relids paramRelids, Relids candidateRelids,
-                        int depthLimit) {
+static void AddColumnarScanPathsRecursive(PlannerInfo *root,
+                                          RelOptInfo *relOptInfo,
+                                          RangeTblEntry *rangeTblEntry,
+                                          Relids paramRelids,
+                                          Relids candidateRelids,
+                                          int depthLimit) {
     CHECK_FOR_INTERRUPTS();
     check_stack_depth();
 
     Assert(!bms_overlap(paramRelids, candidateRelids));
-    AddColumnarScanPath(root, rel, rte, paramRelids);
+    AddColumnarScanPath(root,
+                        relOptInfo,
+                        rangeTblEntry,
+                        paramRelids);
 
     /* recurse for all candidateRelids, unless we hit the depth limit */
     Assert(depthLimit >= 0);
@@ -1112,24 +1124,26 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
     /*
      * Iterate through parameter combinations depth-first. Deeper levels
-     * generate paths of greater parameterization (and hopefully lower
-     * cost).
+     * generate paths of greater parameterization (and hopefully lower cost).
      */
     Relids tmpCandidateRelids = bms_copy(candidateRelids);
+
     int relid = -1;
-    while ((relid = bms_next_member(candidateRelids, relid)) >= 0) {
-        Relids tmpParamRelids = bms_add_member(
-                bms_copy(paramRelids), relid);
+    while ((relid = bms_next_member(candidateRelids, relid)) >= 0) { // bms -> bit map set
+        Relids tmpParamRelids = bms_add_member(bms_copy(paramRelids), relid);
 
         /*
          * Because we are generating combinations (not permutations), remove
-         * the relid from the set of candidates at this level as we descend to
-         * the next.
+         * the relid from the set of candidates at this level as we descend to the next.
          */
         tmpCandidateRelids = bms_del_member(tmpCandidateRelids, relid);
 
-        AddColumnarScanPathsRec(root, rel, rte, tmpParamRelids,
-                                tmpCandidateRelids, depthLimit);
+        AddColumnarScanPathsRecursive(root,
+                                      relOptInfo,
+                                      rangeTblEntry,
+                                      tmpParamRelids,
+                                      tmpCandidateRelids,
+                                      depthLimit);
     }
 
     bms_free(tmpCandidateRelids);
@@ -1195,41 +1209,42 @@ ContainsExecParams(Node *node, void *notUsed) {
  * XXX: Consider refactoring to be more like postgresGetForeignPaths(). The
  * only differences are param_info and custom_private.
  */
-static void
-AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
-                    Relids paramRelids) {
+static void AddColumnarScanPath(PlannerInfo *root,
+                                RelOptInfo *relOptInfo,
+                                RangeTblEntry *rangeTblEntry,
+                                Relids paramRelids) {
     /*
      * Must return a CustomPath, not a larger structure containing a
      * CustomPath as the first field. Otherwise, nodeToString() will fail to
      * output the additional fields.
      */
-    CustomPath *cpath = makeNode(CustomPath);
+    CustomPath *customPath = makeNode(CustomPath);
 
-    cpath->methods = &ColumnarScanPathMethods;
+    customPath->methods = &ColumnarScan_PathMethods;
 
     /*
      * populate generic path information
      */
-    Path *path = &cpath->path;
+    Path *path = &customPath->path;
     path->pathtype = T_CustomScan;
-    path->parent = rel;
-    path->pathtarget = rel->reltarget;
+    path->parent = relOptInfo;
+    path->pathtarget = relOptInfo->reltarget;
 
     /* columnar scans are not parallel-aware, but they are parallel-safe */
-    path->parallel_safe = rel->consider_parallel;
+    path->parallel_safe = relOptInfo->consider_parallel;
 
-    path->param_info = get_baserel_parampathinfo(root, rel, paramRelids);
+    path->param_info = get_baserel_parampathinfo(root, relOptInfo, paramRelids);
 
     /*
      * Usable clauses for this parameterization exist in baserestrictinfo and
      * ppi_clauses.
      */
-    List *allClauses = copyObject(rel->baserestrictinfo);
+    List *allClauses = copyObject(relOptInfo->baserestrictinfo);
     if (path->param_info != NULL) {
         allClauses = list_concat(allClauses, path->param_info->ppi_clauses);
     }
 
-    allClauses = FilterPushdownClauses(root, rel, allClauses);
+    allClauses = FilterPushDownClauses(root, relOptInfo, allClauses);
 
     /*
      * Plain clauses may contain extern params, but not exec params, and can
@@ -1245,7 +1260,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
     ListCell *lc;
     foreach(lc, allClauses) {
         RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-        if (bms_is_subset(rinfo->required_relids, rel->relids) &&
+        if (bms_is_subset(rinfo->required_relids, relOptInfo->relids) &&
             !ContainsExecParams((Node *) rinfo->clause, NULL)) {
             plainClauses = lappend(plainClauses, rinfo);
         }
@@ -1257,16 +1272,16 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
      * we make them sublists in a 2-element list.
      */
     if (EnableColumnarQualPushdown) {
-        cpath->custom_private = list_make2(copyObject(plainClauses),
-                                           copyObject(allClauses));
+        customPath->custom_private = list_make2(copyObject(plainClauses),
+                                                copyObject(allClauses));
     } else {
-        cpath->custom_private = list_make2(NIL, NIL);
+        customPath->custom_private = list_make2(NIL, NIL);
     }
 
-    int numberOfColumnsRead = bms_num_members(rte->selectedCols);
+    int numberOfColumnsRead = bms_num_members(rangeTblEntry->selectedCols);
     int numberOfClausesPushed = list_length(allClauses);
 
-    CostColumnarScan(root, rel, rte->relid, cpath, numberOfColumnsRead,
+    CostColumnarScan(root, relOptInfo, rangeTblEntry->relid, customPath, numberOfColumnsRead,
                      numberOfClausesPushed);
 
 
@@ -1274,12 +1289,12 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
     initStringInfo(&buf);
     ereport(ColumnarPlannerDebugLevel,
             (errmsg("columnar planner: adding CustomScan path for %s",
-                    rte->eref->aliasname),
+                    rangeTblEntry->eref->aliasname),
                     errdetail("%s; %d clauses pushed down",
                               ParameterizationAsString(root, paramRelids, &buf),
                               numberOfClausesPushed)));
 
-    add_path(rel, path);
+    add_path(relOptInfo, path);
 }
 
 
@@ -1362,12 +1377,8 @@ ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRe
 }
 
 
-/*
- * ColumnarTableStripeCount returns the number of stripes that columnar
- * table with relationId has by using stripe metadata.
- */
-static uint64
-ColumnarTableStripeCount(Oid relationId) {
+// returns the number of stripes that columnar table with relationId has by using stripe metadata.
+static uint64 ColumnarTableStripeCount(Oid relationId) {
     Relation relation = RelationIdGetRelation(relationId);
     List *stripeList = StripesForRelfilenode(relation->rd_node);
     int stripeCount = list_length(stripeList);
@@ -1376,14 +1387,12 @@ ColumnarTableStripeCount(Oid relationId) {
     return stripeCount;
 }
 
-
-static Plan *
-ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
-                                RelOptInfo *rel,
-                                struct CustomPath *best_path,
-                                List *tlist,
-                                List *clauses,
-                                List *custom_plans) {
+static Plan *ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
+                                             RelOptInfo *rel,
+                                             struct CustomPath *best_path,
+                                             List *tlist,
+                                             List *clauses,
+                                             List *custom_plans) {
     /*
      * Must return a CustomScan, not a larger structure containing a
      * CustomScan as the first field. Otherwise, copyObject() will fail to
@@ -1391,7 +1400,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
      */
     CustomScan *cscan = makeNode(CustomScan);
 
-    cscan->methods = &ColumnarScanScanMethods;
+    cscan->methods = &ColumnarScan_ScanMethods;
 
     /* XXX: also need to store projected column list for EXPLAIN */
 
@@ -1432,11 +1441,11 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
  * ReparameterizeMutator changes all varnos referencing the topmost parent of
  * child_rel to instead reference child_rel directly.
  */
-static Node *
-ReparameterizeMutator(Node *node, RelOptInfo *child_rel) {
+static Node *ReparameterizeMutator(Node *node, RelOptInfo *child_rel) {
     if (node == NULL) {
         return NULL;
     }
+
     if (IsA(node, Var)) {
         Var *var = castNode(Var, node);
         if (bms_is_member(var->varno, child_rel->top_parent_relids)) {
@@ -1453,7 +1462,8 @@ ReparameterizeMutator(Node *node, RelOptInfo *child_rel) {
                 (Node *) rinfo->clause, ReparameterizeMutator, (void *) child_rel);
         return (Node *) rinfo;
     }
-    return expression_tree_mutator(node, ReparameterizeMutator,
+    return expression_tree_mutator(node,
+                                   ReparameterizeMutator,
                                    (void *) child_rel);
 }
 
@@ -1474,21 +1484,18 @@ ReparameterizeMutator(Node *node, RelOptInfo *child_rel) {
  * notifies us that it needs to be done, and allows us to update the
  * information in custom_private.
  */
-static List *
-ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
-                                                 List *custom_private,
-                                                 RelOptInfo *child_rel) {
+static List *ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
+                                                              List *custom_private,
+                                                              RelOptInfo *child_rel) {
     return (List *) ReparameterizeMutator((Node *) custom_private, child_rel);
 }
 
 
-static Node *
-ColumnarScan_CreateCustomScanState(CustomScan *cscan) {
-    ColumnarScanState *columnarScanState = (ColumnarScanState *) newNode(
-            sizeof(ColumnarScanState), T_CustomScanState);
+static Node *ColumnarScan_CreateCustomScanState(CustomScan *cscan) {
+    ColumnarScanState *columnarScanState = (ColumnarScanState *) newNode(sizeof(ColumnarScanState), T_CustomScanState);
 
-    CustomScanState *cscanstate = &columnarScanState->custom_scanstate;
-    cscanstate->methods = &ColumnarScanExecuteMethods;
+    CustomScanState *cscanstate = &columnarScanState->customScanState;
+    cscanstate->methods = &ColumnarScan_ExecMethods;
 
     return (Node *) cscanstate;
 }
@@ -1529,35 +1536,10 @@ EvalParamsMutator(Node *node, ExprContext *econtext) {
     return expression_tree_mutator(node, EvalParamsMutator, (void *) econtext);
 }
 
-
-static void
-ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int eflags) {
-    CustomScan *cscan = (CustomScan *) cscanstate->ss.ps.plan;
-    ColumnarScanState *columnarScanState = (ColumnarScanState *) cscanstate;
-    ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
-
-    /*
-     * Make a new ExprContext just like the existing one, except that we don't
-     * reset it every tuple.
-     */
-    ExecAssignExprContext(estate, &cscanstate->ss.ps);
-    columnarScanState->css_RuntimeContext = cscanstate->ss.ps.ps_ExprContext;
-    cscanstate->ss.ps.ps_ExprContext = stdecontext;
-
-    ResetExprContext(columnarScanState->css_RuntimeContext);
-    List *plainClauses = linitial(cscan->custom_exprs);
-    columnarScanState->qual = (List *) EvalParamsMutator(
-            (Node *) plainClauses, columnarScanState->css_RuntimeContext);
-
-    /* scan slot is already initialized */
-}
-
-
 /*
  * ColumnarAttrNeeded returns a list of AttrNumber's for the ones that are
  * needed during columnar custom scan.
- * Throws an error if finds a Var referencing to an attribute not supported
- * by ColumnarScan.
+ * Throws an error if finds a Var referencing to an attribute not supported by ColumnarScan.
  */
 static Bitmapset *
 ColumnarAttrNeeded(ScanState *ss) {
@@ -1595,87 +1577,94 @@ ColumnarAttrNeeded(ScanState *ss) {
     return attr_needed;
 }
 
+static TupleTableSlot *ColumnarScanNext(ColumnarScanState *columnarScanState) {
+    CustomScanState *customScanState = (CustomScanState *) columnarScanState;
 
-static TupleTableSlot *
-ColumnarScanNext(ColumnarScanState *columnarScanState) {
-    CustomScanState *node = (CustomScanState *) columnarScanState;
+    // get information from the estate and scan state
+    TableScanDesc tableScanDesc = customScanState->ss.ss_currentScanDesc;
+    EState *estate = customScanState->ss.ps.state;
+    ScanDirection scanDirection = estate->es_direction;
+    TupleTableSlot *tupleTableSlot = customScanState->ss.ss_ScanTupleSlot;
 
-    /*
-     * get information from the estate and scan state
-     */
-    TableScanDesc scandesc = node->ss.ss_currentScanDesc;
-    EState *estate = node->ss.ps.state;
-    ScanDirection direction = estate->es_direction;
-    TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-
-    if (scandesc == NULL) {
+    if (tableScanDesc == NULL) {
         /* the columnar access method does not use the flags, they are specific to heap */
         uint32 flags = 0;
-        Bitmapset *attr_needed = ColumnarAttrNeeded(&node->ss);
+        Bitmapset *attr_needed = ColumnarAttrNeeded(&customScanState->ss);
 
-        /*
-         * We reach here if the scan is not parallel, or if we're serially
-         * executing a scan that was planned to be parallel.
-         */
-        scandesc = columnar_beginscan_extended(node->ss.ss_currentRelation,
-                                               estate->es_snapshot,
-                                               0, NULL, NULL, flags, attr_needed,
-                                               columnarScanState->qual);
+        // We reach here if the scan is not parallel, or if we're serially executing a scan that planned to be parallel
+        // 生成的是 ColumnarScanDesc
+        tableScanDesc = columnar_beginscan_extended(customScanState->ss.ss_currentRelation,
+                                                    estate->es_snapshot,
+                                                    0,
+                                                    NULL,
+                                                    NULL,
+                                                    flags,
+                                                    attr_needed,
+                                                    columnarScanState->qual);
         bms_free(attr_needed);
 
-        node->ss.ss_currentScanDesc = scandesc;
+        customScanState->ss.ss_currentScanDesc = tableScanDesc;
     }
 
-    /*
-     * get the next tuple from the table
-     */
-    if (table_scan_getnextslot(scandesc, direction, slot)) {
-        return slot;
+    // get the next tuple from the table
+    if (table_scan_getnextslot(tableScanDesc, scanDirection, tupleTableSlot)) {
+        return tupleTableSlot;
     }
+
     return NULL;
 }
 
 
-/*
- * SeqRecheck -- access method routine to recheck a tuple in EvalPlanQual
- */
-static bool
-ColumnarScanRecheck(ColumnarScanState *node, TupleTableSlot *slot) {
+// SeqRecheck -- access method routine to recheck a tuple in EvalPlanQual
+static bool ColumnarScanRecheck(ColumnarScanState *node, TupleTableSlot *slot) {
     return true;
 }
 
+static void ColumnarScan_BeginCustomScan(CustomScanState *customScanState,
+                                         EState *estate,
+                                         int eflags) {
+    ColumnarScanState *columnarScanState = (ColumnarScanState *) customScanState;
 
-static TupleTableSlot *
-ColumnarScan_ExecCustomScan(CustomScanState *node) {
+    CustomScan *customScan = (CustomScan *) columnarScanState->customScanState.ss.ps.plan;
+
+    ExprContext *stdecontext = columnarScanState->customScanState.ss.ps.ps_ExprContext;
+
+    // make a new ExprContext just like the existing one, except that we don't reset it every tuple.
+    ExecAssignExprContext(estate, &columnarScanState->customScanState.ss.ps);
+    columnarScanState->css_RuntimeContext = columnarScanState->customScanState.ss.ps.ps_ExprContext;
+
+    columnarScanState->customScanState.ss.ps.ps_ExprContext = stdecontext;
+
+    ResetExprContext(columnarScanState->css_RuntimeContext);
+
+    List *plainClauses = linitial(customScan->custom_exprs);
+    columnarScanState->qual = (List *) EvalParamsMutator((Node *) plainClauses,
+                                                         columnarScanState->css_RuntimeContext);
+
+    /* scan slot is already initialized */
+}
+
+static TupleTableSlot *ColumnarScan_ExecCustomScan(CustomScanState *node) {
     return ExecScan(&node->ss,
                     (ExecScanAccessMtd) ColumnarScanNext,
                     (ExecScanRecheckMtd) ColumnarScanRecheck);
 }
 
-
-static void
-ColumnarScan_EndCustomScan(CustomScanState *node) {
-    /*
-     * get information from node
-     */
+static void ColumnarScan_EndCustomScan(CustomScanState *node) {
+    // get information from node
     TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
 
-    /*
-     * Free the exprcontext
-     */
+    // free the exprcontext
     ExecFreeExprContext(&node->ss.ps);
 
-    /*
-     * clean out the tuple table
-     */
+    // clean out the tuple table
     if (node->ss.ps.ps_ResultTupleSlot) {
         ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
+
     ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
-    /*
-     * close heap scan
-     */
+    // close heap scan
     if (scanDesc != NULL) {
         table_endscan(scanDesc);
     }
@@ -1783,7 +1772,7 @@ ColumnarProjectedColumnsStr(List *context, List *projectedColumns) {
  */
 static List *
 ColumnarVarNeeded(ColumnarScanState *columnarScanState) {
-    ScanState *scanState = &columnarScanState->custom_scanstate.ss;
+    ScanState *scanState = &columnarScanState->customScanState.ss;
 
     List *varList = NIL;
 
