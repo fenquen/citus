@@ -243,7 +243,7 @@ typedef FormData_columnar_options *Form_columnar_options;
 #define Anum_columnar_chunk_storageid 1
 #define Anum_columnar_chunk_stripe 2
 #define Anum_columnar_chunk_attr 3
-#define Anum_columnar_chunk_chunk 4
+#define Anum_columnar_chunk_chunk 4 // 对应chunk_group_num
 #define Anum_columnar_chunk_minimum_value 5
 #define Anum_columnar_chunk_maximum_value 6
 #define Anum_columnar_chunk_value_stream_offset 7
@@ -502,14 +502,14 @@ void SaveStripeSkipList(RelFileNode relFileNode,
     ModifyState *modifyState = StartModifyRelation(columnarChunkTable);
 
     for (uint32 columnIndex = 0; columnIndex < stripeSkipList->columnCount; columnIndex++) {
-        for (uint32 chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++) {
+        for (uint32 chunkIndex = 0; chunkIndex < stripeSkipList->chunkGroupCount; chunkIndex++) {
             ColumnChunkSkipNode *columnChunkSkipNode = &stripeSkipList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
 
             Datum values[Natts_columnar_chunk] = {
                     UInt64GetDatum(storageId),
                     Int64GetDatum(stripeId),
                     Int32GetDatum(columnIndex + 1),
-                    Int32GetDatum(chunkIndex),
+                    Int32GetDatum(chunkIndex), // 对应chunk的4th列 chunk_group_num
                     0, /* to be filled below */
                     0, /* to be filled below */
                     Int64GetDatum(columnChunkSkipNode->valueChunkOffset),
@@ -583,108 +583,112 @@ void SaveChunkGroups(RelFileNode relfilenode,
 }
 
 
-/*
- * ReadStripeSkipList fetches chunk metadata for a given stripe.
- */
-StripeSkipList *
-ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe, TupleDesc tupleDescriptor,
-                   uint32 chunkCount, Snapshot snapshot) {
-    int32 columnIndex = 0;
+// select * from columnar.stripe where storage_id = ? and stripe_num = ?
+StripeSkipList *ReadStripeSkipList(RelFileNode relfilenode,
+                                   uint64 stripeId,
+                                   TupleDesc tupleDesc,
+                                   uint32 stripeChunkGroupCount,
+                                   Snapshot snapshot) {
+
     HeapTuple heapTuple = NULL;
-    uint32 columnCount = tupleDescriptor->natts;
-    ScanKeyData scanKey[2];
+    uint32 columnCount = tupleDesc->natts;
+
 
     uint64 storageId = LookupStorageId(relfilenode);
 
-    Oid columnarChunkOid = ColumnarChunkRelationId();
-    Relation columnarChunk = table_open(columnarChunkOid, AccessShareLock);
+    Oid columnarChunkTableOid = ColumnarChunkRelationId();
+    Relation columnarChunkTable = table_open(columnarChunkTableOid, AccessShareLock);
     Relation index = index_open(ColumnarChunkIndexRelationId(), AccessShareLock);
 
-    ScanKeyInit(&scanKey[0], Anum_columnar_chunk_storageid,
-                BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
-    ScanKeyInit(&scanKey[1], Anum_columnar_chunk_stripe,
-                BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(stripe));
+    ScanKeyData scanKey[2];
+    ScanKeyInit(&scanKey[0],
+                Anum_columnar_chunk_storageid,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                UInt64GetDatum(storageId));
+    ScanKeyInit(&scanKey[1],
+                Anum_columnar_chunk_stripe,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                Int32GetDatum(stripeId));
 
-    SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
-                                                            snapshot, 2, scanKey);
+    SysScanDesc sysScanDesc = systable_beginscan_ordered(columnarChunkTable,
+                                                         index,
+                                                         snapshot,
+                                                         2,
+                                                         scanKey);
 
-    StripeSkipList *chunkList = palloc0(sizeof(StripeSkipList));
-    chunkList->chunkCount = chunkCount;
-    chunkList->columnCount = columnCount;
-    chunkList->columnChunkSkipNodeArray = palloc0(columnCount * sizeof(ColumnChunkSkipNode *));
-    for (columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-        chunkList->columnChunkSkipNodeArray[columnIndex] =
-                palloc0(chunkCount * sizeof(ColumnChunkSkipNode));
+    StripeSkipList *stripeSkipList = palloc0(sizeof(StripeSkipList));
+    stripeSkipList->chunkGroupCount = stripeChunkGroupCount;
+    stripeSkipList->columnCount = columnCount;
+    stripeSkipList->columnChunkSkipNodeArray = palloc0(columnCount * sizeof(ColumnChunkSkipNode *));
+    for (int32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
+        stripeSkipList->columnChunkSkipNodeArray[columnIndex] = palloc0(stripeChunkGroupCount * sizeof(ColumnChunkSkipNode));
     }
 
-    while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+    while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(sysScanDesc,
                                                                  ForwardScanDirection))) {
         Datum datumArray[Natts_columnar_chunk];
         bool isNullArray[Natts_columnar_chunk];
 
-        heap_deform_tuple(heapTuple, RelationGetDescr(columnarChunk), datumArray,
+        heap_deform_tuple(heapTuple,
+                          RelationGetDescr(columnarChunkTable),
+                          datumArray,
                           isNullArray);
 
         int32 attr = DatumGetInt32(datumArray[Anum_columnar_chunk_attr - 1]);
         int32 chunkIndex = DatumGetInt32(datumArray[Anum_columnar_chunk_chunk - 1]);
 
         if (attr <= 0 || attr > columnCount) {
-            ereport(ERROR, (errmsg("invalid columnar chunk entry"),
+            ereport(ERROR, (errmsg("invalid columnar columnChunkSkipNode entry"),
                     errdetail("Attribute number out of range: %d", attr)));
         }
 
-        if (chunkIndex < 0 || chunkIndex >= chunkCount) {
-            ereport(ERROR, (errmsg("invalid columnar chunk entry"),
+        if (chunkIndex < 0 || chunkIndex >= stripeChunkGroupCount) {
+            ereport(ERROR, (errmsg("invalid columnar columnChunkSkipNode entry"),
                     errdetail("Chunk number out of range: %d", chunkIndex)));
         }
 
-        columnIndex = attr - 1;
+        int32 columnIndex = attr - 1;
 
-        ColumnChunkSkipNode *chunk =
-                &chunkList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
-        chunk->rowCount = DatumGetInt64(datumArray[Anum_columnar_chunk_value_count -
-                                                   1]);
-        chunk->valueChunkOffset =
-                DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_offset - 1]);
-        chunk->valueLength =
-                DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_length - 1]);
-        chunk->existsChunkOffset =
-                DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_offset - 1]);
-        chunk->existsLength =
-                DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_length - 1]);
-        chunk->valueCompressionType =
-                DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_type - 1]);
-        chunk->valueCompressionLevel =
-                DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_level - 1]);
-        chunk->decompressedValueSize =
-                DatumGetInt64(datumArray[Anum_columnar_chunk_value_decompressed_size - 1]);
+        ColumnChunkSkipNode *columnChunkSkipNode = &stripeSkipList->columnChunkSkipNodeArray[columnIndex][chunkIndex];
+        columnChunkSkipNode->rowCount = DatumGetInt64(datumArray[Anum_columnar_chunk_value_count - 1]);
+        columnChunkSkipNode->valueChunkOffset = DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_offset - 1]);
+        columnChunkSkipNode->valueLength = DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_length - 1]);
+        columnChunkSkipNode->existsChunkOffset = DatumGetInt64(
+                datumArray[Anum_columnar_chunk_exists_stream_offset - 1]);
+        columnChunkSkipNode->existsLength = DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_length - 1]);
+        columnChunkSkipNode->valueCompressionType = DatumGetInt32(
+                datumArray[Anum_columnar_chunk_value_compression_type - 1]);
+        columnChunkSkipNode->valueCompressionLevel = DatumGetInt32(
+                datumArray[Anum_columnar_chunk_value_compression_level - 1]);
+        columnChunkSkipNode->decompressedValueSize = DatumGetInt64(
+                datumArray[Anum_columnar_chunk_value_decompressed_size - 1]);
 
         if (isNullArray[Anum_columnar_chunk_minimum_value - 1] ||
             isNullArray[Anum_columnar_chunk_maximum_value - 1]) {
-            chunk->hasMinMax = false;
+            columnChunkSkipNode->hasMinMax = false;
         } else {
-            bytea *minValue = DatumGetByteaP(
-                    datumArray[Anum_columnar_chunk_minimum_value - 1]);
-            bytea *maxValue = DatumGetByteaP(
-                    datumArray[Anum_columnar_chunk_maximum_value - 1]);
+            bytea *minValue = DatumGetByteaP(datumArray[Anum_columnar_chunk_minimum_value - 1]);
+            bytea *maxValue = DatumGetByteaP(datumArray[Anum_columnar_chunk_maximum_value - 1]);
 
-            chunk->minimumValue =
-                    ByteaToDatum(minValue, &tupleDescriptor->attrs[columnIndex]);
-            chunk->maximumValue =
-                    ByteaToDatum(maxValue, &tupleDescriptor->attrs[columnIndex]);
+            columnChunkSkipNode->minimumValue = ByteaToDatum(minValue, &tupleDesc->attrs[columnIndex]);
+            columnChunkSkipNode->maximumValue = ByteaToDatum(maxValue, &tupleDesc->attrs[columnIndex]);
 
-            chunk->hasMinMax = true;
+            columnChunkSkipNode->hasMinMax = true;
         }
     }
 
-    systable_endscan_ordered(scanDescriptor);
+    systable_endscan_ordered(sysScanDesc);
     index_close(index, AccessShareLock);
-    table_close(columnarChunk, AccessShareLock);
+    table_close(columnarChunkTable, AccessShareLock);
 
-    chunkList->chunkGroupRowCounts =
-            ReadChunkGroupRowCounts(storageId, stripe, chunkCount, snapshot);
+    stripeSkipList->chunkGroupRowCountArr = ReadChunkGroupRowCounts(storageId,
+                                                                    stripeId,
+                                                                    stripeChunkGroupCount,
+                                                                    snapshot);
 
-    return chunkList;
+    return stripeSkipList;
 }
 
 /*
@@ -810,7 +814,7 @@ static StripeMetadata *StripeMetadataLookupByRowNumber(Relation relation,
 
     // columnar.stripe表
     Relation columnarStripeTable = table_open(ColumnarStripeRelationId(), AccessShareLock);
-    Relation index = index_open(ColumnarStripeFirstRowNumberIndexRelationId(),AccessShareLock);
+    Relation index = index_open(ColumnarStripeFirstRowNumberIndexRelationId(), AccessShareLock);
     SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripeTable,
                                                             index,
                                                             snapshot,
@@ -846,7 +850,7 @@ static StripeMetadata *StripeMetadataLookupByRowNumber(Relation relation,
 static void
 CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata) {
     bool stripeLooksInProgress =
-            stripeMetadata->rowCount == 0 && stripeMetadata->chunkCount == 0 &&
+            stripeMetadata->rowCount == 0 && stripeMetadata->chunkGroupCount == 0 &&
             stripeMetadata->fileOffset == ColumnarInvalidLogicalOffset &&
             stripeMetadata->dataLength == 0;
 
@@ -856,7 +860,7 @@ CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata) {
      * with respect to each other.
      */
     bool stripeLooksFlushed =
-            stripeMetadata->rowCount > 0 && stripeMetadata->chunkCount > 0 &&
+            stripeMetadata->rowCount > 0 && stripeMetadata->chunkGroupCount > 0 &&
             ((stripeMetadata->fileOffset != ColumnarInvalidLogicalOffset &&
               stripeMetadata->dataLength > 0) ||
              (stripeMetadata->fileOffset == ColumnarInvalidLogicalOffset &&
@@ -1302,7 +1306,7 @@ static StripeMetadata *BuildStripeMetadata(Relation columnarStripes,
     stripeMetadata->fileOffset = DatumGetInt64(datumArray[Anum_columnar_stripe_file_offset - 1]);
     stripeMetadata->dataLength = DatumGetInt64(datumArray[Anum_columnar_stripe_data_length - 1]);
     stripeMetadata->columnCount = DatumGetInt32(datumArray[Anum_columnar_stripe_column_count - 1]);
-    stripeMetadata->chunkCount = DatumGetInt32(datumArray[Anum_columnar_stripe_chunk_count - 1]);
+    stripeMetadata->chunkGroupCount = DatumGetInt32(datumArray[Anum_columnar_stripe_chunk_count - 1]);
     stripeMetadata->chunkGroupRowCount = DatumGetInt32(datumArray[Anum_columnar_stripe_chunk_row_count - 1]);
     stripeMetadata->rowCount = DatumGetInt64(datumArray[Anum_columnar_stripe_row_count - 1]);
     stripeMetadata->firstRowNumber = DatumGetUInt64(datumArray[Anum_columnar_stripe_first_row_number - 1]);

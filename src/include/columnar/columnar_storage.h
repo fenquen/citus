@@ -54,8 +54,8 @@ extern uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen);
 extern uint64 ColumnarStorageReserveRowNumber(Relation relation, uint64 stripeRowLimit);
 extern uint64 ColumnarStorageReserveStripeId(Relation targetTable);
 
-extern void ColumnarStorageRead(Relation rel, uint64 logicalOffset,
-								char *data, uint32 amount);
+extern void ColumnarStorageRead(Relation relation, uint64 logicalOffset,
+                                char *data, uint32 length);
 extern void ColumnarStorageWrite(Relation relation, uint64 logicalOffset,
                                  char *data, uint32 length);
 extern bool ColumnarStorageTruncate(Relation rel, uint64 newDataReservation);

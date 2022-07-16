@@ -68,7 +68,7 @@ typedef struct ColumnarTableDDLContext {
     ColumnarOptions options;
 } ColumnarTableDDLContext;
 
-// contains statistics for a ChunkData ,几乎对应了 columnar.chunk表
+// contains statistics for a ChunkData ,几乎对应了 columnar.chunk表 对应了某个column上的某chunk
 typedef struct ColumnChunkSkipNode {
     /* statistics about values of a column chunk */
     bool hasMinMax;
@@ -97,19 +97,28 @@ typedef struct ColumnChunkSkipNode {
     int valueCompressionLevel;
 } ColumnChunkSkipNode;
 
-
 /*
- * 对应 columnCount * maxChunkCount columnar.chunk表的信息
+ * 是columnarWriteState顶级字段
+ * 对应 columnCount * maxChunkCount 数量的 columnar.chunk表的信息
  *
  * StripeSkipList can be used for skipping row chunks. It contains a column chunk
  * skip node for each chunk of each column. columnChunkSkipNodeArray[column][chunk]
  * is the entry for the specified column chunk.
  */
 typedef struct StripeSkipList {
-    ColumnChunkSkipNode **columnChunkSkipNodeArray; // columnCount * maxChunkCount 二维数组
-    uint32 *chunkGroupRowCounts; // 记录各个的chunk用了多少行
+    // columnCount * maxChunkCount 二维数组
+    ColumnChunkSkipNode **columnChunkSkipNodeArray;
+
+    // 记录各个的chunkGroup用了多少行
+    uint32 *chunkGroupRowCountArr;
+
     uint32 columnCount;
-    uint32 chunkCount; // 当前处理过的chunk数量 也意味着是实际需要的chunk数量
+
+    // 当前columnarWriteState维度里处理过的chunkGroup数量也意味着是实际需要的chunk数量
+    // 某表有2个的column 各个的column的data占用2个chunk
+    // 那么照理来说实际上有4个的chunk chunkGroup来说是2个
+    // 也能认为是单个的column占用的chunk数量
+    uint32 chunkGroupCount;
 } StripeSkipList;
 
 
@@ -131,7 +140,7 @@ typedef struct ChunkData {
     bool **existsArray; // columnCount 乘以 chunkRowLimit
     Datum **valueArray; // columnCount 乘以 chunkRowLimit 读取的时候用到
 
-    // 数量和columnCount相同,用来临时保存的
+    // 数量和columnCount相同用来临时保存的 它保存的是整个列的data
     // valueBuffer keeps actual data for type-by-reference datums from valueArray
     StringInfo *columnDataArr;
 } ChunkData;
@@ -151,17 +160,17 @@ typedef struct ColumnChunkBuffers {
     uint64 decompressedValueSize;
 } ColumnChunkBuffers;
 
-
 /*
- * ColumnBuffers represents data buffers for a column in a row stripe. Each
- * column is made of multiple column chunks.
+ * represent data buffers for a column in a row stripe
+ * each column is made of multiple column chunks.
  */
 typedef struct ColumnBuffers {
     ColumnChunkBuffers **columnChunkBuffersArray;
 } ColumnBuffers;
 
 
-/* StripeBuffers 对应 data for 1行 column.stripe表 */
+// StripeBuffers 对应 data for 1行 column.stripe表
+// 是ColumnarWriteState顶级字段
 typedef struct StripeBuffers {
     uint32 columnCount;
     uint32 rowCount; // 起始的时候是0 记录处理过的行数
@@ -301,9 +310,9 @@ extern void SaveStripeSkipList(RelFileNode relFileNode, uint64 stripeId,
 extern void SaveChunkGroups(RelFileNode relfilenode, uint64 stripeId,
                             List *chunkGroupRowCounts);
 
-extern StripeSkipList *ReadStripeSkipList(RelFileNode relfilenode, uint64 stripe,
-                                          TupleDesc tupleDescriptor,
-                                          uint32 chunkCount,
+extern StripeSkipList *ReadStripeSkipList(RelFileNode relfilenode, uint64 stripeId,
+                                          TupleDesc tupleDesc,
+                                          uint32 stripeChunkGroupCount,
                                           Snapshot snapshot);
 
 extern StripeMetadata *FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,

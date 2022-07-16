@@ -18,7 +18,7 @@ typedef struct StripeMetadata {
     uint64 fileOffset; // 该stripe在整个表的存储中的偏移
     uint64 dataLength;
     uint32 columnCount;
-    uint32 chunkCount;
+    uint32 chunkGroupCount; // 对应stripe表的chunk_group_count
     uint32 chunkGroupRowCount;
     uint64 rowCount;
     uint64 id;

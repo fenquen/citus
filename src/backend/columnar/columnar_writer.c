@@ -254,7 +254,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
         columnChunkSkipNode->rowCount++;
     }
 
-    stripeSkipList->chunkCount = chunkIndex + 1;
+    stripeSkipList->chunkGroupCount = chunkIndex + 1;
 
     // 到了chunk容量临界点 rotate 到stripeBuffer对应点位
     if (chunkRowIndex == chunkRowLimit - 1) {
@@ -370,7 +370,7 @@ static StripeSkipList *CreateEmptyStripeSkipList(uint32 stripeMaxRowCount,
     StripeSkipList *stripeSkipList = palloc0(sizeof(StripeSkipList));
 
     stripeSkipList->columnCount = columnCount;
-    stripeSkipList->chunkCount = 0;
+    stripeSkipList->chunkGroupCount = 0;
     stripeSkipList->columnChunkSkipNodeArray = columnChunkSkipNodeArray;
 
     return stripeSkipList;
@@ -388,7 +388,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
 
     uint32 columnCount = columnarWriteState->tupleDesc->natts;
 
-    uint32 chunkCount = columnarWriteState->stripeSkipList->chunkCount;
+    uint32 chunkCount = columnarWriteState->stripeSkipList->chunkGroupCount;
 
     uint32 lastChunkIndex =
             columnarWriteState->stripeBuffers->rowCount / columnarWriteState->options.chunkRowLimit;
@@ -484,7 +484,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
     for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
         // ColumnBuffers *columnBuffers = columnarWriteState->stripeBuffers->columnBuffersArray[columnIndex];
 
-        // exists体系
+        // exist体系
         for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
             ColumnChunkBuffers *columnChunkBuffers =
                     columnarWriteState->

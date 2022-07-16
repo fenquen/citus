@@ -20,11 +20,15 @@
 #include "columnar/columnar_compression.h"
 
 #if HAVE_CITUS_LIBLZ4
+
 #include <lz4.h>
+
 #endif
 
 #if HAVE_LIBZSTD
+
 #include <zstd.h>
+
 #endif
 
 // The information at the start of the compressed data. This decription is taken
@@ -141,10 +145,9 @@ bool CompressBuffer(StringInfo inputBuffer,
  * DecompressBuffer decompresses the given buffer with the given compression
  * type. This function returns the buffer as-is when no compression is applied.
  */
-StringInfo
-DecompressBuffer(StringInfo buffer,
-                 CompressionType compressionType,
-                 uint64 decompressedSize) {
+StringInfo DecompressBuffer(StringInfo buffer,
+                            CompressionType compressionType,
+                            uint64 decompressedSize) {
     switch (compressionType) {
         case COMPRESSION_NONE: {
             return buffer;

@@ -62,12 +62,12 @@ typedef bool (*PathPredicate)(Path *path);
 
 
 /* functions to cost paths in-place */
-static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId);
+static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *relOptInfo, Oid relationId);
 
 static void CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
                                   IndexPath *indexPath);
 
-static void CostColumnarSeqPath(RelOptInfo *rel, Oid relationId, Path *path);
+static void CostColumnarSeqPath(RelOptInfo *relOptInfo, Oid relationOid, Path *path);
 
 static void CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
                              CustomPath *cpath, int numberOfColumnsRead,
@@ -98,7 +98,7 @@ static Cost ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId,
 
 static uint64 ColumnarTableStripeCount(Oid relationId);
 
-static Path *CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel,
+static Path *CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *relOptInfo,
                                        Oid relationId);
 
 static void AddColumnarScanPathsRecursive(PlannerInfo *root,
@@ -225,7 +225,7 @@ void columnar_customscan_init() {
                          "into the storage layer."),
             NULL,
             &EnableColumnarCustomScan,
-            true,
+            false,
             PGC_USERSET,
             GUC_NO_SHOW_ALL,
             NULL, NULL, NULL);
@@ -341,8 +341,8 @@ static void ColumnarSetRelPathlistHook(PlannerInfo *root,
              * comparisons between them.
              *
              * Even more, we might calculate an equal cost for a
-             * ColumnarCustomScan and a SeqPath(create_seqscan_path) if we are reading all columns
-             * of given table since we don't consider chunk group filtering
+             * ColumnarCustomScan and a SeqPath(create_seqscan_path) if we are reading all columns of
+             * a given table since we don't consider chunk group filtering
              * when costing ColumnarCustomScan.
              * In that case, if we don't remove SeqPath's, we might wrongly choose
              * SeqPath thinking that its cost would be equal to ColumnarCustomScan.
@@ -399,36 +399,39 @@ static bool IsNotIndexPath(Path *path) {
     return !IsA(path, IndexPath);
 }
 
-/*
- * returns Path for sequential scan on columnar table with relationId.
- */
-static Path *
-CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
+// return Path for sequential scan on columnar table with relationId,生成的path的type是T_SeqScan
+static Path *CreateColumnarSeqScanPath(PlannerInfo *root,
+                                       RelOptInfo *relOptInfo,
+                                       Oid relationId) {
     /* columnar doesn't support parallel scan */
     int parallelWorkers = 0;
 
-    Relids requiredOuter = rel->lateral_relids;
-    Path *path = create_seqscan_path(root, rel, requiredOuter, parallelWorkers);
-    CostColumnarSeqPath(rel, relationId, path);
+    Relids requiredOuter = relOptInfo->lateral_relids;
+    Path *path = create_seqscan_path(root,
+                                     relOptInfo,
+                                     requiredOuter,
+                                     parallelWorkers);
+    CostColumnarSeqPath(relOptInfo, relationId, path);
     return path;
 }
 
 
 // re-costs paths of given RelOptInfo for columnar table with relationId.
-static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId) {
+static void CostColumnarPaths(PlannerInfo *root,
+                              RelOptInfo *relOptInfo,
+                              Oid relationId) {
     Path *path = NULL;
-    foreach_ptr(path, rel->pathlist) {
+    foreach_ptr(path, relOptInfo->pathlist) {
         if (IsA(path, IndexPath)) {
             /*
              * Since we don't provide implementations for scan_bitmap_next_block
              * & scan_bitmap_next_tuple, postgres doesn't generate bitmap index
              * scan paths for columnar tables already (see related comments in
-             * TableAmRoutine). For this reason, we only consider IndexPath's
-             * here.
+             * TableAmRoutine). For this reason, we only consider IndexPath's here.
              */
-            CostColumnarIndexPath(root, rel, relationId, (IndexPath *) path);
+            CostColumnarIndexPath(root, relOptInfo, relationId, (IndexPath *) path);
         } else if (path->pathtype == T_SeqScan) {
-            CostColumnarSeqPath(rel, relationId, path);
+            CostColumnarSeqPath(relOptInfo, relationId, path);
         }
     }
 }
@@ -438,9 +441,10 @@ static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId
  * CostColumnarIndexPath re-costs given index path for columnar table with
  * relationId.
  */
-static void
-CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
-                      IndexPath *indexPath) {
+static void CostColumnarIndexPath(PlannerInfo *root,
+                                  RelOptInfo *rel,
+                                  Oid relationId,
+                                  IndexPath *indexPath) {
     if (!enable_indexscan) {
         /* costs are already set to disable_cost, don't adjust them */
         return;
@@ -558,25 +562,24 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 
 /*
  * CostColumnarSeqPath sets costs given seq path for columnar table with
- * relationId.
+ * relationOid.
  */
-static void
-CostColumnarSeqPath(RelOptInfo *rel, Oid relationId, Path *path) {
+static void CostColumnarSeqPath(RelOptInfo *relOptInfo,
+                                Oid relationOid,
+                                Path *path) {
     if (!enable_seqscan) {
         /* costs are already set to disable_cost, don't adjust them */
         return;
     }
 
-    /*
-     * Seq scan doesn't support projection or qual pushdown, so we will read
-     * all the stripes and all the columns.
-     */
-    double stripesToRead = ColumnarTableStripeCount(relationId);
-    int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationId);
+    // seq scan doesn't support projection or qual push down, so we will read all the stripes and all the columns.
+    double stripesToRead = ColumnarTableStripeCount(relationOid);
+    int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationOid);
 
     path->startup_cost = 0;
-    path->total_cost = stripesToRead *
-                       ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
+    path->total_cost = stripesToRead * ColumnarPerStripeScanCost(relOptInfo,
+                                                                 relationOid,
+                                                                 numberOfColumnsRead);
 }
 
 
@@ -1072,7 +1075,7 @@ static void AddColumnarScanPaths(PlannerInfo *root,
 
 
 /*
- * AddColumnarScanPathsRecursive is a recursive function to search the
+ * a recursive function to search the
  * parameterization space and add CustomPaths for columnar scans.
  *
  * The set paramRelids is the parameterization at the current level, and
@@ -1204,7 +1207,7 @@ ContainsExecParams(Node *node, void *notUsed) {
 
 
 /*
- * Create and add a path with the given parameterization paramRelids.
+ * create and add a path with the given parameterization paramRelids.
  *
  * XXX: Consider refactoring to be more like postgresGetForeignPaths(). The
  * only differences are param_info and custom_private.
@@ -1233,7 +1236,9 @@ static void AddColumnarScanPath(PlannerInfo *root,
     /* columnar scans are not parallel-aware, but they are parallel-safe */
     path->parallel_safe = relOptInfo->consider_parallel;
 
-    path->param_info = get_baserel_parampathinfo(root, relOptInfo, paramRelids);
+    path->param_info = get_baserel_parampathinfo(root,
+                                                 relOptInfo,
+                                                 paramRelids);
 
     /*
      * Usable clauses for this parameterization exist in baserestrictinfo and
@@ -1281,12 +1286,17 @@ static void AddColumnarScanPath(PlannerInfo *root,
     int numberOfColumnsRead = bms_num_members(rangeTblEntry->selectedCols);
     int numberOfClausesPushed = list_length(allClauses);
 
-    CostColumnarScan(root, relOptInfo, rangeTblEntry->relid, customPath, numberOfColumnsRead,
+    CostColumnarScan(root,
+                     relOptInfo,
+                     rangeTblEntry->relid,
+                     customPath,
+                     numberOfColumnsRead,
                      numberOfClausesPushed);
 
 
     StringInfoData buf;
     initStringInfo(&buf);
+
     ereport(ColumnarPlannerDebugLevel,
             (errmsg("columnar planner: adding CustomScan path for %s",
                     rangeTblEntry->eref->aliasname),

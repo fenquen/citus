@@ -433,30 +433,34 @@ uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen) {
  * ColumnarStorageRead - map the logical offset to a block and offset, then
  * read the buffer from multiple blocks if necessary.
  */
-void
-ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amount) {
+void ColumnarStorageRead(Relation relation,
+                         uint64 logicalOffset,
+                         char *data,
+                         uint32 length) {
     /* if there's no work to do, succeed even with invalid offset */
-    if (amount == 0) {
+    if (length == 0) {
         return;
     }
 
     if (!ColumnarLogicalOffsetIsValid(logicalOffset)) {
-        elog(ERROR,
-             "attempted columnar read on relation %d from invalid logical offset: "
-                     UINT64_FORMAT,
-             rel->rd_id, logicalOffset);
+        elog(ERROR,"attempted columnar byteLenRead on relation %d from invalid logical offset: " UINT64_FORMAT,
+             relation->rd_id, logicalOffset);
     }
 
-    uint64 read = 0;
+    uint64 byteLenRead = 0;
 
-    while (read < amount) {
-        PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
+    while (byteLenRead < length) {
+        PhysicalAddr physicalAddr = LogicalToPhysical(logicalOffset + byteLenRead);
 
-        uint32 to_read = Min(amount - read, BLCKSZ - addr.offset);
-        ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
+        uint32 to_read = Min(length - byteLenRead, BLCKSZ - physicalAddr.offset);
+        ReadFromBlock(relation,
+                      physicalAddr.blockno,
+                      physicalAddr.offset,
+                      data + byteLenRead,
+                      to_read,
                       false);
 
-        read += to_read;
+        byteLenRead += to_read;
     }
 }
 

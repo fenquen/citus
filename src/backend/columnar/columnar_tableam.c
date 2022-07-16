@@ -1124,11 +1124,11 @@ LogRelationStats(Relation rel, int elevel) {
         StripeMetadata *stripe = lfirst(stripeMetadataCell);
         StripeSkipList *skiplist = ReadStripeSkipList(relfilenode, stripe->id,
                                                       RelationGetDescr(rel),
-                                                      stripe->chunkCount,
+                                                      stripe->chunkGroupCount,
                                                       GetTransactionSnapshot());
         for (uint32 column = 0; column < skiplist->columnCount; column++) {
             bool attrDropped = tupdesc->attrs[column].attisdropped;
-            for (uint32 chunk = 0; chunk < skiplist->chunkCount; chunk++) {
+            for (uint32 chunk = 0; chunk < skiplist->chunkGroupCount; chunk++) {
                 ColumnChunkSkipNode *skipnode =
                         &skiplist->columnChunkSkipNodeArray[column][chunk];
 

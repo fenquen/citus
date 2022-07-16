@@ -28,3 +28,7 @@ SELECT alter_columnar_table_set('columnar_table',stripe_row_limit => 100000);
 
 chunk是针对某个column的 表有多个的column  那么这些的column构成chunk_group
 bms的意思是bit map set
+heap_deform_tuple把heaptuple变为datum数组
+
+chunkGroupCount
+    某表有2个的column 各个的column的data占用2个chunk 那么照理来说实际上有4个的chunk chunkGroup来说是2个
