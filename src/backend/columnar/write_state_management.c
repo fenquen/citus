@@ -169,6 +169,7 @@ ColumnarWriteState *columnar_init_write_state(Relation relation,
     // otherwise we need to create a new stack entry for the current sub transaction.
     MemoryContext oldContext = MemoryContextSwitchTo(WriteStateContext);//----------------切换
 
+    // 读取 columnar.options
     ColumnarOptions columnarOptions = {0};
     ReadColumnarOptions(relation->rd_id, &columnarOptions);
 

@@ -547,7 +547,7 @@ extern CollateExpr * RelabelTypeToCollateExpr(RelabelType *relabelType);
  * Function declarations for building, updating constraints and simple operator
  * expression check.
  */
-extern Node * BuildBaseConstraint(Var *column);
+extern Node * BuildBaseConstraint(Var *var);
 extern void UpdateConstraint(Node *baseConstraint, ShardInterval *shardInterval);
 extern bool BinaryOpExpression(Expr *clause, Node **leftOperand, Node **rightOperand);
 extern bool SimpleOpExpression(Expr *clause);

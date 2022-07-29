@@ -85,7 +85,7 @@ typedef struct ColumnarScanDescData {
      */
     MemoryContext scanContext;
     Bitmapset *attr_needed;
-    List *scanQual;
+    List *scanQual; // Restrictinfo*的list
 } ColumnarScanDescData;
 
 
@@ -267,7 +267,7 @@ static MemoryContext CreateColumnarScanMemoryContext(void) {
 static ColumnarReadState *init_columnar_read_state(Relation relation,
                                                    TupleDesc tupleDesc,
                                                    Bitmapset *attr_needed,
-                                                   List *scanQual,
+                                                   List *whereClauseList,
                                                    MemoryContext scanContext,
                                                    Snapshot snapshot,
                                                    bool randomAccess) {
@@ -279,7 +279,7 @@ static ColumnarReadState *init_columnar_read_state(Relation relation,
     ColumnarReadState *columnarReadState = ColumnarBeginRead(relation,
                                                              tupleDesc,
                                                              usedColNaturalPosList,
-                                                             scanQual,
+                                                             whereClauseList,
                                                              scanContext,
                                                              snapshot,
                                                              randomAccess);
@@ -692,7 +692,7 @@ static void columnar_tuple_insert(Relation relation,
 
     // allocates write state in a longer lasting context, so no need to worry about it.
     ColumnarWriteState *columnarWriteState = columnar_init_write_state(relation,
-                                                                       RelationGetDescr(relation),
+                                                                       relation->rd_att,
                                                                        GetCurrentSubTransactionId());
 
     MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(columnarWriteState));
@@ -1860,7 +1860,6 @@ static void ColumnarSubXactCallback(SubXactEvent event,
         }
     }
 }
-
 
 void columnar_tableam_init() {
     RegisterXactCallback(ColumnarXactCallback, NULL);

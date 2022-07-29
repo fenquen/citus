@@ -49,7 +49,7 @@ struct ColumnarWriteState {
     List *chunkGroupRowCounts; // 记录各个chunk的row用量
 
     /*
-     * StringInfo 类似 bytebuffer
+     * StringInfo 类似 bytebuffer,用来在rotate chunk数据(chunk装满的时候)临时存放压缩data的
      * compressionBuffer buffer is used as temporary storage during
      * data value compression operation. It is kept here to minimize
      * memory allocations. It lives in stripeWriteContext and gets
@@ -70,15 +70,15 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState);
 
 static StringInfo SerializeBoolArray(const bool *boolArray, uint32 boolArrayLength);
 
-static void SerializeSingleDatum(StringInfo datumBuffer, Datum columnData,
-                                 bool datumTypeByValue, int datumTypeLength,
-                                 char datumTypeAlign);
+static void SerializeSingleDatum(StringInfo columnMultiRowDataContainer, Datum columnOneRowData,
+                                 bool columnTypeIsByValue, int columnTypeLength,
+                                 char columnTypeAlign);
 
 static void SerializeChunkData(ColumnarWriteState *columnarWriteState, uint32 chunkIndex,
                                uint32 chunkUsedRowCount);
 
 static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *columnChunkSkipNode,
-                                      Datum columnValue, bool columnTypeByValue,
+                                      Datum columnValue, bool columnTypeIsByValue,
                                       int columnTypeLength, Oid columnCollation,
                                       FmgrInfo *compareFunc);
 
@@ -177,7 +177,8 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
     ColumnarOptions *columnarOptions = &columnarWriteState->options;
     const uint32 chunkRowLimit = columnarOptions->chunkRowLimit;
 
-    ChunkData *chunkData = columnarWriteState->chunkData;
+
+    //ChunkData *chunkData = columnarWriteState->chunkData;
 
     MemoryContext oldContext = MemoryContextSwitchTo(columnarWriteState->stripeWriteContext);
 
@@ -210,7 +211,7 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
 
         // serializedValueBuffer lives in stripe write memory context, need be initialized when the stripe is created
         for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-            chunkData->columnDataArr[columnIndex] = makeStringInfo();
+            columnarWriteState->chunkData->columnDataArr[columnIndex] = makeStringInfo();
         }
     }
 
@@ -223,28 +224,28 @@ uint64 ColumnarWriteRow(ColumnarWriteState *columnarWriteState,
         ColumnChunkSkipNode *columnChunkSkipNode = &chunkSkipNodeArray[columnIndex][chunkIndex];
 
         if (columnNulls[columnIndex]) {
-            chunkData->existsArray[columnIndex][chunkRowIndex] = false;
+            columnarWriteState->chunkData->existsArray[columnIndex][chunkRowIndex] = false;
         } else {
-            chunkData->existsArray[columnIndex][chunkRowIndex] = true;
+            columnarWriteState->chunkData->existsArray[columnIndex][chunkRowIndex] = true;
 
             FmgrInfo *compareFunc = columnarWriteState->compareFuncArr[columnIndex];
 
             Form_pg_attribute attributeForm = TupleDescAttr(columnarWriteState->tupleDesc, columnIndex);
-            bool columnTypeByValue = attributeForm->attbyval;
+            bool columnTypeIsByValue = attributeForm->attbyval;
             int columnTypeLength = attributeForm->attlen;
             char columnTypeAlign = attributeForm->attalign;
             Oid columnCollation = attributeForm->attcollation;
 
             // 该行当前列的data落到当前column对应的valueBufferArray
-            SerializeSingleDatum(chunkData->columnDataArr[columnIndex],
+            SerializeSingleDatum(columnarWriteState->chunkData->columnDataArr[columnIndex],
                                  rowData[columnIndex],
-                                 columnTypeByValue,
+                                 columnTypeIsByValue,
                                  columnTypeLength,
                                  columnTypeAlign);
 
             UpdateChunkSkipNodeMinMax(columnChunkSkipNode,
                                       rowData[columnIndex],
-                                      columnTypeByValue,
+                                      columnTypeIsByValue,
                                       columnTypeLength,
                                       columnCollation,
                                       compareFunc);
@@ -388,13 +389,12 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
 
     uint32 columnCount = columnarWriteState->tupleDesc->natts;
 
-    uint32 chunkCount = columnarWriteState->stripeSkipList->chunkGroupCount;
+    uint32 chunkGroupCount = columnarWriteState->stripeSkipList->chunkGroupCount;
 
     uint32 lastChunkIndex =
             columnarWriteState->stripeBuffers->rowCount / columnarWriteState->options.chunkRowLimit;
     uint32 lastChunkUsedRowCount =
             columnarWriteState->stripeBuffers->rowCount % columnarWriteState->options.chunkRowLimit;
-
 
     elog(DEBUG1, "Flushing Stripe of size %d", columnarWriteState->stripeBuffers->rowCount);
 
@@ -419,18 +419,18 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         //ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
 
         // exist体系
-        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        for (uint32 chunkGroupIndex = 0; chunkGroupIndex < chunkGroupCount; chunkGroupIndex++) {
             // 精确到了 [column][chunk]
             ColumnChunkBuffers *columnChunkBuffers =
                     columnarWriteState->
                             stripeBuffers->
                             columnBuffersArray[columnIndex]->
-                            columnChunkBuffersArray[chunkIndex];
+                            columnChunkBuffersArray[chunkGroupIndex];
 
             ColumnChunkSkipNode *columnChunkSkipNode =
                     &columnarWriteState->
                             stripeSkipList->
-                            columnChunkSkipNodeArray[columnIndex][chunkIndex];
+                            columnChunkSkipNodeArray[columnIndex][chunkGroupIndex];
 
             columnChunkSkipNode->existsChunkOffset = stripeSize;
             columnChunkSkipNode->existsLength = columnChunkBuffers->existsBuffer->len;
@@ -439,7 +439,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         }
 
         // value体系
-        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        for (uint32 chunkIndex = 0; chunkIndex < chunkGroupCount; chunkIndex++) {
             // 精确到了 [column][chunk]
             ColumnChunkBuffers *columnChunkBuffers =
                     columnarWriteState->
@@ -462,11 +462,12 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         }
     }
 
+    // 对应相应的columnar.stripe记录 进行 update
     StripeMetadata *stripeMetadata = CompleteStripeReservation(targetTable,
                                                                columnarWriteState->emptyStripeReservation->stripeId,
                                                                stripeSize,
                                                                columnarWriteState->stripeBuffers->rowCount,
-                                                               chunkCount);
+                                                               chunkGroupCount);
 
     // 该stripe在整个表的存储中的偏移
     uint64 currentFileOffset = stripeMetadata->fileOffset;
@@ -485,7 +486,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         // ColumnBuffers *columnBuffers = columnarWriteState->stripeBuffers->columnBuffersArray[columnIndex];
 
         // exist体系
-        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        for (uint32 chunkIndex = 0; chunkIndex < chunkGroupCount; chunkIndex++) {
             ColumnChunkBuffers *columnChunkBuffers =
                     columnarWriteState->
                             stripeBuffers->
@@ -501,7 +502,7 @@ static void FlushStripe(ColumnarWriteState *columnarWriteState) {
         }
 
         // value体系
-        for (uint32 chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        for (uint32 chunkIndex = 0; chunkIndex < chunkGroupCount; chunkIndex++) {
 
             StringInfo valueBuffer =
                     columnarWriteState->
@@ -561,40 +562,40 @@ static StringInfo SerializeBoolArray(const bool *boolArray, uint32 boolArrayLeng
 }
 
 
-// SerializeSingleDatum serializes the given columnData value and appends it to the provided string info buffer.
-static void SerializeSingleDatum(StringInfo datumBuffer,
-                                 Datum columnData,
-                                 bool datumTypeByValue,
-                                 int datumTypeLength,
-                                 char datumTypeAlign) {
+// SerializeSingleDatum serializes the given columnOneRowData value and appends it to the provided string info buffer.
+static void SerializeSingleDatum(StringInfo columnMultiRowDataContainer,
+                                 Datum columnOneRowData,
+                                 bool columnTypeIsByValue,
+                                 int columnTypeLength,
+                                 char columnTypeAlign) {
 
-    uint32 datumLength = att_addlength_datum(0, datumTypeLength, columnData);
-    uint32 datumLengthAligned = att_align_nominal(datumLength, datumTypeAlign);
+    uint32 datumLength = att_addlength_datum(0, columnTypeLength, columnOneRowData);
+    uint32 datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
 
-    enlargeStringInfo(datumBuffer, datumLengthAligned);
+    enlargeStringInfo(columnMultiRowDataContainer, datumLengthAligned);
 
-    char *currentDatumDataPointer = datumBuffer->data + datumBuffer->len;
+    char *currentDatumDataPointer = columnMultiRowDataContainer->data + columnMultiRowDataContainer->len;
     memset(currentDatumDataPointer, 0, datumLengthAligned);
 
-    if (datumTypeLength > 0) {
-        if (datumTypeByValue) {
-            store_att_byval(currentDatumDataPointer, columnData, datumTypeLength);
+    if (columnTypeLength > 0) {
+        if (columnTypeIsByValue) {
+            store_att_byval(currentDatumDataPointer, columnOneRowData, columnTypeLength);
         } else {
             memcpy_s(currentDatumDataPointer,
-                     datumBuffer->maxlen - datumBuffer->len,
-                     DatumGetPointer(columnData),
-                     datumTypeLength);
+                     columnMultiRowDataContainer->maxlen - columnMultiRowDataContainer->len,
+                     DatumGetPointer(columnOneRowData),
+                     columnTypeLength);
         }
     } else {
-        Assert(!datumTypeByValue);
+        Assert(!columnTypeIsByValue);
 
         memcpy_s(currentDatumDataPointer,
-                 datumBuffer->maxlen - datumBuffer->len,
-                 DatumGetPointer(columnData),
+                 columnMultiRowDataContainer->maxlen - columnMultiRowDataContainer->len,
+                 DatumGetPointer(columnOneRowData),
                  datumLength);
     }
 
-    datumBuffer->len += datumLengthAligned;
+    columnMultiRowDataContainer->len += datumLengthAligned;
 }
 
 
@@ -605,7 +606,7 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
                                uint32 chunkUsedRowCount) {
 
     // chunkData是总的 columnarWriteState维度
-    ChunkData *chunkData = columnarWriteState->chunkData;
+    //ChunkData *chunkData = columnarWriteState->chunkData;
 
     CompressionType compressionType = columnarWriteState->options.compressionType;
     int compressionLevel = columnarWriteState->options.compressionLevel;
@@ -624,8 +625,8 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
                         columnBuffersArray[columnIndex]->
                         columnChunkBuffersArray[chunkIndex];
 
-        columnChunkBuffers->existsBuffer =
-                SerializeBoolArray(chunkData->existsArray[columnIndex], chunkUsedRowCount);
+        columnChunkBuffers->existsBuffer = SerializeBoolArray(columnarWriteState->chunkData->existsArray[columnIndex],
+                                                              chunkUsedRowCount);
     }
 
     /*
@@ -641,11 +642,11 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
 
         CompressionType actualCompressionType = COMPRESSION_NONE;
 
-        StringInfo columnData = chunkData->columnDataArr[columnIndex];
+        StringInfo columnData = columnarWriteState->chunkData->columnDataArr[columnIndex];
 
         Assert(compressionType >= 0 && compressionType < COMPRESSION_COUNT);
 
-        columnChunkBuffers->decompressedValueSize = chunkData->columnDataArr[columnIndex]->len;
+        columnChunkBuffers->decompressedValueSize = columnarWriteState->chunkData->columnDataArr[columnIndex]->len;
 
         // if columnData need compressed, update columnData with compressed data and store compression type.
         bool compressed = CompressBuffer(columnData,
@@ -662,7 +663,7 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
         columnChunkBuffers->valueBuffer = CopyStringInfo(columnData);
 
         // valueBuffer needs to be reset for next chunk's data
-        resetStringInfo(chunkData->columnDataArr[columnIndex]);
+        resetStringInfo(columnarWriteState->chunkData->columnDataArr[columnIndex]);
     }
 }
 
@@ -675,7 +676,7 @@ static void SerializeChunkData(ColumnarWriteState *columnarWriteState,
  */
 static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *columnChunkSkipNode,
                                       Datum columnValue,
-                                      bool columnTypeByValue,
+                                      bool columnTypeIsByValue,
                                       int columnTypeLength,
                                       Oid columnCollation,
                                       FmgrInfo *compareFunc) {
@@ -693,8 +694,8 @@ static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *columnChunkSkipNode,
     }
 
     if (!hasMinMax) {
-        currentMinimum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
-        currentMaximum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+        currentMinimum = DatumCopy(columnValue, columnTypeIsByValue, columnTypeLength);
+        currentMaximum = DatumCopy(columnValue, columnTypeIsByValue, columnTypeLength);
     } else {
         // 和之前最小值比
         Datum minimumComparisonDatum = FunctionCall2Coll(compareFunc,
@@ -712,14 +713,14 @@ static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *columnChunkSkipNode,
 
         // 说明要比之前的最小值还要小 是新的最小的值
         if (minCompareResult < 0) {
-            currentMinimum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+            currentMinimum = DatumCopy(columnValue, columnTypeIsByValue, columnTypeLength);
         } else { // 保持原样
             currentMinimum = previousMinimum;
         }
 
         // 说明要比之前最大值还要大 是新的最大的值
         if (maxCompareResult > 0) {
-            currentMaximum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+            currentMaximum = DatumCopy(columnValue, columnTypeIsByValue, columnTypeLength);
         } else { // 保持原样
             currentMaximum = previousMaximum;
         }

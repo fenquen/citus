@@ -236,9 +236,9 @@ extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *columnarWr
 extern ColumnarReadState *ColumnarBeginRead(Relation relation,
                                             TupleDesc tupleDesc,
                                             List *usedColNaturalPosList,
-                                            List *qualConditions,
+                                            List *whereClauseList,
                                             MemoryContext scanContext,
-                                            Snapshot snaphot,
+                                            Snapshot snapshot,
                                             bool randomAccess);
 
 extern void ColumnarReadFlushPendingWrites(ColumnarReadState *columnarReadState);

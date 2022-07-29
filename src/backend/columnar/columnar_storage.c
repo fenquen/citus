@@ -718,7 +718,9 @@ static void WriteToBlock(Relation relation,
              pageHeader->pd_upper - pageHeader->pd_lower,
              buf,
              length);
+
     pageHeader->pd_lower += length;
+
 
     MarkBufferDirty(buffer);
 

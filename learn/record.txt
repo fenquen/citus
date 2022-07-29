@@ -26,9 +26,25 @@ INSERT INTO columnar_table (id, addr) SELECT d, 'a' FROM generate_series(1,20000
 
 SELECT alter_columnar_table_set('columnar_table',stripe_row_limit => 100000);
 
-chunk是针对某个column的 表有多个的column  那么这些的column构成chunk_group
 bms的意思是bit map set
 heap_deform_tuple把heaptuple变为datum数组
 
 chunkGroupCount
-    某表有2个的column 各个的column的data占用2个chunk 那么照理来说实际上有4个的chunk chunkGroup来说是2个
+    某表有2个的column 各个的column的data占用2个chunk 那么照理来说实际上有4个的chunk chunkGroup来说是2个 相同行上的2个chunk视为同个的chunkGroup
+
+
+select a.id,b.addr from columnar_table a ,row_table b where  a.id = b.id and a.id=1;
+
+select a.id,b.addr from columnar_table a left join row_table b on a.id = b.id where a.id=1;
+
+relOptInfo.relid是它对应的table在sql中的位置(1based)
+
+bitmapset原理
+    int/64 得到当前在哪个unsigned long上
+    int%64 得到当前在的unsigned long里边的位置
+
+
+(OpExpr *)((RestrictInfo *)path->param_info->ppi_clauses->head->data.ptr_value)->clause
+
+
+目前来说where条件的精确粒度是chunk的细不到chunk里具体的row的

@@ -155,7 +155,7 @@ static bool *SelectedChunkGroupMask(StripeSkipList *stripeSkipList,
                                     List *whereClauseList, List *whereClauseVars,
                                     int64 *chunkGroupsFiltered);
 
-static Node *BuildBaseConstraint(Var *variable);
+static Node *BuildBaseConstraint(Var *var);
 
 static List *GetClauseVars(List *clauses, int natts);
 
@@ -189,8 +189,8 @@ static Datum ColumnDefaultValue(TupleConstr *tupleConstraints,
                                 Form_pg_attribute attributeForm);
 
 /*
- * ColumnarBeginRead initializes a columnar read operation. This function returns a
- * read handle that's used during reading rows and finishing the read operation.
+ * ColumnarBeginRead initializes whereClauseList columnar read operation. This function returns whereClauseList
+ * read handle that'snapshot used during reading rows and finishing the read operation.
  *
  * usedColNaturalPosList is an integer list of attribute numbers (1-indexed).
  */
@@ -203,7 +203,7 @@ ColumnarReadState *ColumnarBeginRead(Relation relation,
                                      bool randomAccess) {
     /*
      * We allocate all stripe specific data in the stripeReadContext, and reset
-     * this memory context before loading a new stripe. This is to avoid memory leaks.
+     * this memory context before loading whereClauseList new stripe. This is to avoid memory leaks.
      */
     //  MemoryContext stripeReadContext = CreateStripeReadMemoryContext();
 
@@ -218,7 +218,7 @@ ColumnarReadState *ColumnarBeginRead(Relation relation,
     columnarReadState->stripeReadContext = CreateStripeReadMemoryContext();;
     columnarReadState->stripeReadState = NULL;
     columnarReadState->scanContext = scanContext;
-    // Note that ColumnarReadFlushPendingWrites might update those two by registering a new snapshot.
+    // Note that ColumnarReadFlushPendingWrites might update those two by registering whereClauseList new snapshot.
     columnarReadState->snapshot = snapshot;
     columnarReadState->snapshotRegisteredByUs = false;
 
@@ -237,7 +237,7 @@ ColumnarReadState *ColumnarBeginRead(Relation relation,
          *
          * Moreover, Since we don't flush pending writes for random access,
          * AdvanceStripeRead might encounter with stripe metadata entries due
-         * to current transaction's pending writes even when using an MVCC
+         * to current transaction'snapshot pending writes even when using an MVCC
          * snapshot, but AdvanceStripeRead would throw an error for that.
          * Note that this is not the case with for plain table scan methods
          * (i.e.: SeqScan and Columnar CustomScan).
@@ -1130,9 +1130,9 @@ FmgrInfo *GetCompareFunc(Oid typeId,
  * on a similar function from CitusDB's shard pruning logic.
  */
 static Node *
-BuildBaseConstraint(Var *variable) {
-    OpExpr *lessThanExpr = MakeOpExpression(variable, BTLessEqualStrategyNumber);
-    OpExpr *greaterThanExpr = MakeOpExpression(variable, BTGreaterEqualStrategyNumber);
+BuildBaseConstraint(Var *var) {
+    OpExpr *lessThanExpr = MakeOpExpression(var, BTLessEqualStrategyNumber);
+    OpExpr *greaterThanExpr = MakeOpExpression(var, BTGreaterEqualStrategyNumber);
 
     Node *baseConstraint = make_and_qual((Node *) lessThanExpr, (Node *) greaterThanExpr);
 

@@ -454,7 +454,7 @@ bool ReadColumnarOptions(Oid regclass, ColumnarOptions *columnarOptions) {
     if (index == NULL) {
         table_close(optionsTable, AccessShareLock);
 
-        /* extension has been dropped */
+        // extension has been dropped
         return false;
     }
 
@@ -1222,9 +1222,7 @@ static StripeMetadata *UpdateStripeMetadataRow(uint64 storageId,
     // Existing tuple now contains modifications, because we used heap_inplace_update().
     HeapTuple newTuple = oldTuple;
 
-    /*
-     * Must not pass modifiedTuple, because BuildStripeMetadata expects a real heap tuple with MVCC fields.
-     */
+    // Must not pass modifiedTuple, because BuildStripeMetadata expects a real heap tuple with MVCC fields.
     StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripeTable,
                                                                  newTuple);
 
@@ -1618,9 +1616,7 @@ static Oid ColumnarStripeFirstRowNumberIndexRelationId(void) {
 }
 
 
-/*
- * ColumnarOptionsRelationId returns relation id of columnar.options.
- */
+// relation id of columnar.options.
 static Oid ColumnarOptionsRelationId(void) {
     return get_relname_relid("options", ColumnarNamespaceId());
 }

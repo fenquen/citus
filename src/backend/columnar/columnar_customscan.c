@@ -54,7 +54,7 @@ typedef struct ColumnarScanState {
     CustomScanState customScanState; /* must be first field */
 
     ExprContext *css_RuntimeContext;
-    List *qual;
+    List *qual;// Restrictinfo* 的 list
 } ColumnarScanState;
 
 
@@ -221,11 +221,10 @@ void columnar_customscan_init() {
     /* register customscan specific GUC's */
     DefineCustomBoolVariable(
             "columnar.enable_custom_scan",
-            gettext_noop("Enables the use of a custom scan to push projections and quals "
-                         "into the storage layer."),
+            gettext_noop("enable use of a custom scan to push projections and quals into storage layer."),
             NULL,
             &EnableColumnarCustomScan,
-            false,
+            true,
             PGC_USERSET,
             GUC_NO_SHOW_ALL,
             NULL, NULL, NULL);
@@ -283,8 +282,8 @@ void columnar_customscan_init() {
 
 
 static void ColumnarSetRelPathlistHook(PlannerInfo *root,
-                                       RelOptInfo *relOptInfo,
-                                       Index rti,
+                                       RelOptInfo *relOptInfo, // 这个relOptInfo只是root的多个的中的1个 它对应的index便是rti也和其relid属性相同
+                                       Index rti,// 当前relation在sql中的index(1起始的) 和relOptInfo.relid是对应的意义相同的
                                        RangeTblEntry *rangeTblEntry) {
     // call previous hook if assigned
     if (PreviousSetRelPathlistHook) {
@@ -305,11 +304,13 @@ static void ColumnarSetRelPathlistHook(PlannerInfo *root,
      */
     Relation relation = RelationIdGetRelation(rangeTblEntry->relid);
     if (relation->rd_tableam == GetColumnarTableAmRoutine()) {
+        // 不支持sample
         if (rangeTblEntry->tablesample != NULL) {
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                     errmsg("sample scans not supported on columnar tables")));
         }
 
+        // 不支持parallel scan
         if (list_length(relOptInfo->partial_pathlist) != 0) {
             // Parallel scans on columnar tables are discarded by ColumnarGetRelationInfoHook but be on the safe side.
             elog(ERROR, "parallel scans on columnar are not supported");
@@ -328,6 +329,8 @@ static void ColumnarSetRelPathlistHook(PlannerInfo *root,
          */
         CostColumnarPaths(root, relOptInfo, rangeTblEntry->relid);
 
+        // 生成T_SeqScan的path 对应的是select * from columnar_table
+        // add_path只会把成本更低的加到relOptInfo.pathlist 因而是不会有的重复的
         Path *seqPath = CreateColumnarSeqScanPath(root, relOptInfo, rangeTblEntry->relid);
         add_path(relOptInfo, seqPath);
 
@@ -646,16 +649,11 @@ CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation
     return true;
 }
 
+// return true if any of the Expr's Vars refer to the given relid; false otherwise.
+static bool ExprReferencesRelid(Expr *expr, Index relid) {
+    List *exprVars = pull_var_clause((Node *) expr,
+                                     PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS);
 
-/*
- * ExprReferencesRelid returns true if any of the Expr's Vars refer to the
- * given relid; false otherwise.
- */
-static bool
-ExprReferencesRelid(Expr *expr, Index relid) {
-    List *exprVars = pull_var_clause(
-            (Node *) expr, PVC_RECURSE_AGGREGATES |
-                           PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS);
     ListCell *lc;
     foreach(lc, exprVars) {
         Var *var = (Var *) lfirst(lc);
@@ -667,16 +665,15 @@ ExprReferencesRelid(Expr *expr, Index relid) {
     return false;
 }
 
-
 /*
  * ExtractPushDownClause extracts an Expr node from given clause for pushing down
- * into the given rel (including join clauses). This test may not be exact in
+ * into the given relOptInfo (including join clauses). This test may not be exact in
  * all cases; it's used to reduce the search space for parameterization.
  *
  * Note that we don't try to handle cases like "Var + ExtParam = 3". That
  * would require going through eval_const_expression after parameter binding,
  * and that doesn't seem worth the effort. Here we just look for "Var op Expr"
- * or "Expr op Var", where Var references rel and Expr references other rels
+ * or "Expr op Var", where Var references relOptInfo and Expr references other rels
  * (or no rels at all).
  *
  * Moreover, this function also looks into BoolExpr's to recursively extract
@@ -716,7 +713,9 @@ ExprReferencesRelid(Expr *expr, Index relid) {
  * expressions, we will pushdown the following:
  *  (a < 200) OR ((a = 300) OR (a > 400))
  */
-static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *node) {
+static Expr *ExtractPushDownClause(PlannerInfo *root,
+                                   RelOptInfo *relOptInfo,
+                                   Node *node) {// restrictInfo->clause
     CHECK_FOR_INTERRUPTS();
     check_stack_depth();
 
@@ -724,7 +723,7 @@ static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *nod
         return NULL;
     }
 
-    if (IsA(node, BoolExpr)) {
+    if (IsA(node, BoolExpr)) { // BoolExpr 列如 a.id=1 and b.id=1 的这个and
         BoolExpr *boolExpr = castNode(BoolExpr, node);
         if (boolExpr->boolop == NOT_EXPR) {
             /*
@@ -734,8 +733,7 @@ static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *nod
              *   WHERE id NOT IN (SELECT id FROM something).
              */
             ereport(ColumnarPlannerDebugLevel,
-                    (errmsg("columnar planner: cannot push down clause: "
-                            "must not contain a subplan")));
+                    (errmsg("columnar planner: cannot push down clause containing a sub plan")));
             return NULL;
         }
 
@@ -743,16 +741,17 @@ static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *nod
 
         Node *boolExprArg = NULL;
         foreach_ptr(boolExprArg, boolExpr->args) {
-            Expr *pushdownableArg = ExtractPushDownClause(root, rel,
+            Expr *pushdownableArg = ExtractPushDownClause(root,
+                                                          relOptInfo,
                                                           (Node *) boolExprArg);
             if (pushdownableArg) {
                 pushdownableArgs = lappend(pushdownableArgs, pushdownableArg);
             } else if (boolExpr->boolop == OR_EXPR) {
                 ereport(ColumnarPlannerDebugLevel,
                         (errmsg("columnar planner: cannot push down clause: "
-                                "all arguments of an OR expression must be "
-                                "pushdownable but one of them was not, due "
-                                "to the reason given above")));
+                                "all arguments of an OR expression must can be "
+                                "push down but one of them was not, "
+                                "due to the reason given above")));
                 return NULL;
             }
 
@@ -763,65 +762,65 @@ static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *nod
         if (npushdownableArgs == 0) {
             ereport(ColumnarPlannerDebugLevel,
                     (errmsg("columnar planner: cannot push down clause: "
-                            "none of the arguments were pushdownable, "
-                            "due to the reason(s) given above ")));
+                            "none of the arguments can be push down due to the reason(s) given above ")));
             return NULL;
-        } else if (npushdownableArgs == 1) {
+        }
+
+        if (npushdownableArgs == 1) {
             return (Expr *) linitial(pushdownableArgs);
         }
 
         if (boolExpr->boolop == AND_EXPR) {
             return make_andclause(pushdownableArgs);
-        } else if (boolExpr->boolop == OR_EXPR) {
-            return make_orclause(pushdownableArgs);
-        } else {
-            /* already discarded NOT expr, so should not be reachable */
-            return NULL;
         }
+
+        if (boolExpr->boolop == OR_EXPR) {
+            return make_orclause(pushdownableArgs);
+        }
+
+        // already discarded NOT expr, so should not be reachable
+        return NULL;
     }
 
     if (!IsA(node, OpExpr) || list_length(((OpExpr *) node)->args) != 2) {
         ereport(ColumnarPlannerDebugLevel,
-                (errmsg("columnar planner: cannot push down clause: "
-                        "must be binary operator expression")));
+                (errmsg("columnar planner: cannot push down clause which is not binary operator expression")));
         return NULL;
     }
 
+    // Expr->BoolExpr,OpExpr,Var
     OpExpr *opExpr = castNode(OpExpr, node);
     Expr *lhs = list_nth(opExpr->args, 0);
     Expr *rhs = list_nth(opExpr->args, 1);
 
-    Var *varSide;
+    Var *varSide; // 是在当前的columnar table上的 势必要和relOptInfo->relid是相同的
     Expr *exprSide;
 
-    if (IsA(lhs, Var) && ((Var *) lhs)->varno == rel->relid &&
-        !ExprReferencesRelid((Expr *) rhs, rel->relid)) {
+    if (IsA(lhs, Var) && ((Var *) lhs)->varno == relOptInfo->relid && // relOptInfo->relid正是对应的是columnar table
+        !ExprReferencesRelid(rhs, relOptInfo->relid)) {
         varSide = castNode(Var, lhs);
         exprSide = rhs;
-    } else if (IsA(rhs, Var) && ((Var *) rhs)->varno == rel->relid &&
-               !ExprReferencesRelid((Expr *) lhs, rel->relid)) {
+    } else if (IsA(rhs, Var) && ((Var *) rhs)->varno == relOptInfo->relid &&
+               !ExprReferencesRelid(lhs, relOptInfo->relid)) {
         varSide = castNode(Var, rhs);
         exprSide = lhs;
     } else {
         ereport(ColumnarPlannerDebugLevel,
-                (errmsg("columnar planner: cannot push down clause: "
-                        "must match 'Var <op> Expr' or 'Expr <op> Var'"),
-                        errhint("Var must only reference this rel, "
-                                "and Expr must not reference this rel")));
+                (errmsg("columnar planner: cannot push down clause:must match 'Var <op> Expr' or 'Expr <op> Var'"),
+                        errhint("Var must only reference this relOptInfo,and Expr must not reference this relOptInfo")));
         return NULL;
     }
 
     if (varSide->varattno <= 0) {
         ereport(ColumnarPlannerDebugLevel,
-                (errmsg("columnar planner: cannot push down clause: "
-                        "var is whole-row reference or system column")));
+                (errmsg("columnar planner:cannot push down clause var is whole-row reference or system column")));
+
         return NULL;
     }
 
-    if (contain_volatile_functions((Node *) exprSide)) {
+    if (contain_volatile_functions((Node *) exprSide)) { // 应该是对应create function的sql中的volatile
         ereport(ColumnarPlannerDebugLevel,
-                (errmsg("columnar planner: cannot push down clause: "
-                        "expr contains volatile functions")));
+                (errmsg("columnar planner: cannot push down clause:expr contains volatile functions")));
         return NULL;
     }
 
@@ -830,12 +829,11 @@ static Expr *ExtractPushDownClause(PlannerInfo *root, RelOptInfo *rel, Node *nod
     Oid varOpFamily;
     Oid varOpcInType;
 
-    if (!OidIsValid(varOpClass) ||
-        !get_opclass_opfamily_and_input_type(varOpClass, &varOpFamily,
-                                             &varOpcInType)) {
+    if (!OidIsValid(varOpClass) || !get_opclass_opfamily_and_input_type(varOpClass,
+                                                                        &varOpFamily,
+                                                                        &varOpcInType)) {
         ereport(ColumnarPlannerDebugLevel,
-                (errmsg("columnar planner: cannot push down clause: "
-                        "cannot find default btree opclass and opfamily for type: %s",
+                (errmsg("columnar planner:cannot push down clause:cannot find default btree opclass and opfamily for type: %s",
                         format_type_be(varSide->vartype))));
         return NULL;
     }
@@ -894,7 +892,9 @@ static List *FilterPushDownClauses(PlannerInfo *root,
             continue;
         }
 
-        Expr *pushDownExpr = ExtractPushDownClause(root, relOptInfo, (Node *) restrictInfo->clause);
+        Expr *pushDownExpr = ExtractPushDownClause(root,
+                                                   relOptInfo,
+                                                   (Node *) restrictInfo->clause);
         if (!pushDownExpr) {
             continue;
         }
@@ -908,7 +908,6 @@ static List *FilterPushDownClauses(PlannerInfo *root,
     return filteredClauses;
 }
 
-
 /*
  * callback that returns true, indicating that
  * we want all the clauses from generate_implied_equalities_for_column().
@@ -921,9 +920,9 @@ static bool PushdownJoinClauseMatches(PlannerInfo *root,
     return true;
 }
 
-
 // finds join clauses including those implied by ECs, that may be pushed down.
 static List *FindPushdownJoinClauses(PlannerInfo *root, RelOptInfo *relOptInfo) {
+    // restrictInfo
     List *joinClauses = copyObject(relOptInfo->joininfo);
 
     /*
@@ -931,11 +930,12 @@ static List *FindPushdownJoinClauses(PlannerInfo *root, RelOptInfo *relOptInfo) 
      *
      * Here we are generating the clauses just so we can later extract the
      * interesting relids. This is somewhat wasteful, but it allows us to
-     * filter out join clauses, reducing the number of relids we need to
-     * consider.
+     * filter out join clauses, reducing the number of relids we need to consider.
      *
      * XXX: also find additional clauses for join info that are implied by ECs?
      */
+    // create ec-derived joinclauses usable with a specific column
+    // ec 对应的是 EquivalenceClass
     List *ecClauses = generate_implied_equalities_for_column(root,
                                                              relOptInfo,
                                                              PushdownJoinClauseMatches,
@@ -964,6 +964,7 @@ static Relids FindCandidateRelids(PlannerInfo *root,
 
     ListCell *listCell;
     foreach(listCell, joinClauseList) {
+        // 对应1个 AND sub-clause of a restriction condition (WHERE or JOIN/ON clause)
         RestrictInfo *restrictInfo = (RestrictInfo *) lfirst(listCell);
 
         candidateRelids = bms_add_members(candidateRelids, restrictInfo->required_relids);
@@ -1054,6 +1055,7 @@ static int ChooseDepthLimit(int nCandidates) {
 static void AddColumnarScanPaths(PlannerInfo *root,
                                  RelOptInfo *relOptInfo,
                                  RangeTblEntry *rangeTblEntry) {
+    // 其实是RestrictInfo的list
     List *joinClauses = FindPushdownJoinClauses(root, relOptInfo);
 
     Relids candidateRelids = FindCandidateRelids(root,
@@ -1113,32 +1115,29 @@ static void AddColumnarScanPathsRecursive(PlannerInfo *root,
     CHECK_FOR_INTERRUPTS();
     check_stack_depth();
 
-    Assert(!bms_overlap(paramRelids, candidateRelids));
+    Assert(!bms_overlap(paramRelids, candidateRelids));// 要保证两者之间没有交集
     AddColumnarScanPath(root,
                         relOptInfo,
                         rangeTblEntry,
                         paramRelids);
 
-    /* recurse for all candidateRelids, unless we hit the depth limit */
+    // recurse for all candidateRelids, unless we hit the depth limit
     Assert(depthLimit >= 0);
     if (depthLimit-- == 0) {
         return;
     }
 
-    /*
-     * Iterate through parameter combinations depth-first. Deeper levels
-     * generate paths of greater parameterization (and hopefully lower cost).
-     */
+
+    // Iterate through parameter combinations depth-first. Deeper levels
+    // generate paths of greater parameterization (and hopefully lower cost).
     Relids tmpCandidateRelids = bms_copy(candidateRelids);
 
     int relid = -1;
     while ((relid = bms_next_member(candidateRelids, relid)) >= 0) { // bms -> bit map set
         Relids tmpParamRelids = bms_add_member(bms_copy(paramRelids), relid);
 
-        /*
-         * Because we are generating combinations (not permutations), remove
-         * the relid from the set of candidates at this level as we descend to the next.
-         */
+        // Because we are generating combinations (not permutations), remove
+        // the relid from the set of candidates at this level as we descend to the next.
         tmpCandidateRelids = bms_del_member(tmpCandidateRelids, relid);
 
         AddColumnarScanPathsRecursive(root,
@@ -1244,8 +1243,8 @@ static void AddColumnarScanPath(PlannerInfo *root,
      * Usable clauses for this parameterization exist in baserestrictinfo and
      * ppi_clauses.
      */
-    List *allClauses = copyObject(relOptInfo->baserestrictinfo);
-    if (path->param_info != NULL) {
+    List *allClauses = copyObject(relOptInfo->baserestrictinfo);// baserestrictinfo 对应的是b.id=1 是通过等价的转换得到的
+    if (path->param_info != NULL) { // 上个的递归时候这里是null 在这的时候不是了
         allClauses = list_concat(allClauses, path->param_info->ppi_clauses);
     }
 
@@ -1276,7 +1275,7 @@ static void AddColumnarScanPath(PlannerInfo *root,
      * everything in the custom_private list. To keep the two lists separate,
      * we make them sublists in a 2-element list.
      */
-    if (EnableColumnarQualPushdown) {
+    if (EnableColumnarQualPushdown) {// custom_private的最终用途 落地到了 SelectedChunkGroupMask 函数的whereClauseList
         customPath->custom_private = list_make2(copyObject(plainClauses),
                                                 copyObject(allClauses));
     } else {
