@@ -1052,8 +1052,7 @@ StripesForRelfilenode(RelFileNode relfilenode) {
  * for empty tables. So this doesn't throw errors for empty tables and
  * returns 0.
  */
-uint64
-GetHighestUsedAddress(RelFileNode relfilenode) {
+uint64 GetHighestUsedAddress(RelFileNode relfilenode) {
     uint64 storageId = LookupStorageId(relfilenode);
 
     uint64 highestUsedAddress = 0;
@@ -1121,7 +1120,6 @@ EmptyStripeReservation *ReserveEmptyStripe(Relation targetTable,
 
     return emptyStripeReservation;
 }
-
 
 /*
  * update columnar.stripe表的 对应 storageId stripeId 的那条记录

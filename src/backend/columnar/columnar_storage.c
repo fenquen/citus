@@ -146,8 +146,8 @@ static void ColumnarMetapageCheckVersion(Relation relation, ColumnarMetapage *co
  *
  * Caller must hold AccessExclusiveLock on the relation.
  */
-void ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
-    BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
+void ColumnarStorageInit(SMgrRelation sMgrRelation, uint64 storageId) {
+    BlockNumber nblocks = smgrnblocks(sMgrRelation, MAIN_FORKNUM);
 
     if (nblocks > 0) {
         elog(ERROR, "attempted to initialize columnarMetapage, but %d pages already exist", nblocks);
@@ -179,8 +179,8 @@ void ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
     pageHeader->pd_lower += sizeof(ColumnarMetapage);
 
     PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
-    smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
-    log_newpage(&srel->smgr_rnode.node,
+    smgrwrite(sMgrRelation, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
+    log_newpage(&sMgrRelation->smgr_rnode.node,
                 MAIN_FORKNUM,
                 COLUMNAR_METAPAGE_BLOCKNO,
                 page,
@@ -189,8 +189,8 @@ void ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
     // write empty page 起始是对page什么都不干直接smgrwrite
     PageInit(page, BLCKSZ, 0);
     PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
-    smgrwrite(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
-    log_newpage(&srel->smgr_rnode.node,
+    smgrwrite(sMgrRelation, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
+    log_newpage(&sMgrRelation->smgr_rnode.node,
                 MAIN_FORKNUM,
                 COLUMNAR_EMPTY_BLOCKNO,
                 page,
@@ -201,7 +201,7 @@ void ColumnarStorageInit(SMgrRelation srel, uint64 storageId) {
      * write did not go through shared_buffers and therefore a concurrent
      * checkpoint may have moved the redo pointer past our xlog record.
      */
-    smgrimmedsync(srel, MAIN_FORKNUM);
+    smgrimmedsync(sMgrRelation, MAIN_FORKNUM);
 }
 
 
@@ -310,8 +310,7 @@ ColumnarStorageGetReservedStripeId(Relation rel, bool force) {
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
-ColumnarStorageGetReservedRowNumber(Relation rel, bool force) {
+uint64 ColumnarStorageGetReservedRowNumber(Relation rel, bool force) {
     ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
     return metapage.reservedRowNumber;
@@ -324,20 +323,14 @@ ColumnarStorageGetReservedRowNumber(Relation rel, bool force) {
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
-ColumnarStorageGetReservedOffset(Relation rel, bool force) {
+uint64 ColumnarStorageGetReservedOffset(Relation rel, bool force) {
     ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
 
     return metapage.reservedOffset;
 }
 
-
-/*
- * ColumnarStorageIsCurrent - return true if metapage exists and is not
- * the current version.
- */
-bool
-ColumnarStorageIsCurrent(Relation rel) {
+// ColumnarStorageIsCurrent - return true if metapage exists and is not the current version.
+bool ColumnarStorageIsCurrent(Relation rel) {
     RelationOpenSmgr(rel);
     BlockNumber nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
@@ -349,11 +342,7 @@ ColumnarStorageIsCurrent(Relation rel) {
     return ColumnarMetapageIsCurrent(&metapage);
 }
 
-
-/*
- * ColumnarStorageReserveRowNumber returns reservedRowNumber and advances
- * it for next row number reservation.
- */
+// reservedRowNumber and advances it for next row number reservation.
 uint64 ColumnarStorageReserveRowNumber(Relation relation, uint64 stripeRowLimit) {
     LockRelationForExtension(relation, ExclusiveLock);
 
@@ -368,7 +357,6 @@ uint64 ColumnarStorageReserveRowNumber(Relation relation, uint64 stripeRowLimit)
 
     return firstRowNumber;
 }
-
 
 /*
  * returns stripeId and advances it for next stripeId reservation.
@@ -390,8 +378,7 @@ uint64 ColumnarStorageReserveStripeId(Relation targetTable) {
     return stripeId;
 }
 
-
-// reserve logical data offsets for writing
+// 提前去extend表对应的数据文件 reserve logical data offsets for writing
 uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen) {
     if (byteLen == 0) {
         return ColumnarInvalidLogicalOffset;
@@ -405,19 +392,18 @@ uint64 ColumnarStorageReserveData(Relation targetTable, uint64 byteLen) {
     uint64 alignedReservation = AlignReservation(columnarMetapage.reservedOffset);
     uint64 nextReservation = alignedReservation + byteLen;
     columnarMetapage.reservedOffset = nextReservation;
-
     // write new reservation
     ColumnarOverwriteMetapage(targetTable, columnarMetapage);
 
     /* last used PhysicalAddr of new reservation */
-    PhysicalAddr final = LogicalToPhysical(nextReservation - 1);
+    PhysicalAddr physicalAddr = LogicalToPhysical(nextReservation - 1);
 
     /* extend with new pages */
     RelationOpenSmgr(targetTable);
     BlockNumber nblocks = smgrnblocks(targetTable->rd_smgr, MAIN_FORKNUM);
 
-    while (nblocks <= final.blockno) {
-        Buffer newBuffer = ReadBuffer(targetTable, P_NEW);
+    while (nblocks <= physicalAddr.blockno) {
+        Buffer newBuffer = ReadBuffer(targetTable, P_NEW); // P_NEW 这个特殊标识会去拓展文件大小
         Assert(BufferGetBlockNumber(newBuffer) == nblocks);
         ReleaseBuffer(newBuffer);
         nblocks++;
@@ -720,7 +706,6 @@ static void WriteToBlock(Relation relation,
              length);
 
     pageHeader->pd_lower += length;
-
 
     MarkBufferDirty(buffer);
 

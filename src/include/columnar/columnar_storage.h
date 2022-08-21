@@ -36,7 +36,7 @@
 #define ColumnarLogicalOffsetIsValid(X) ((X) >= ColumnarFirstLogicalOffset)
 
 
-extern void ColumnarStorageInit(SMgrRelation srel, uint64 storageId);
+extern void ColumnarStorageInit(SMgrRelation sMgrRelation, uint64 storageId);
 extern bool ColumnarStorageIsCurrent(Relation rel);
 extern void ColumnarStorageUpdateCurrent(Relation rel, bool upgrade,
 										 uint64 reservedStripeId,
