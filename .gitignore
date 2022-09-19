@@ -48,7 +48,7 @@ lib*.pc
 # output from diff normalization that shouldn't be commited
 *.unmodified
 *.modified
-
 # style related temporary outputs
 *.uncrustify
 .idea
+.Ds_store
